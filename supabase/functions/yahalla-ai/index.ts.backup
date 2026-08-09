@@ -1,0 +1,358 @@
+import { createClient } from 'npm:@supabase/supabase-js@2'
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers':
+    'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+}
+
+type RequestBody = {
+  message?: string
+}
+
+function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'application/json',
+    },
+  })
+}
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', {
+      headers: corsHeaders,
+    })
+  }
+
+  if (req.method !== 'POST') {
+    return json(
+      {
+        success: false,
+        error: 'Method not allowed',
+      },
+      405,
+    )
+  }
+
+  try {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+
+    if (!supabaseUrl || !serviceRoleKey) {
+      return json(
+        {
+          success: false,
+          error: 'Supabase server configuration is missing.',
+        },
+        500,
+      )
+    }
+
+    const authorization = req.headers.get('Authorization')
+
+    if (!authorization?.startsWith('Bearer ')) {
+      return json(
+        {
+          success: false,
+          error: 'Authentication required.',
+        },
+        401,
+      )
+    }
+
+    const token = authorization.replace('Bearer ', '').trim()
+
+    const admin = createClient(
+      supabaseUrl,
+      serviceRoleKey,
+      {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      },
+    )
+
+    const {
+      data: { user },
+      error: userError,
+    } = await admin.auth.getUser(token)
+
+    if (userError || !user) {
+      return json(
+        {
+          success: false,
+          error: 'Invalid authentication token.',
+        },
+        401,
+      )
+    }
+
+    const body = (await req.json()) as RequestBody
+    const message = body.message?.trim()
+
+    if (!message) {
+      return json(
+        {
+          success: false,
+          error: 'Message is required.',
+        },
+        400,
+      )
+    }
+
+    if (message.length > 10000) {
+      return json(
+        {
+          success: false,
+          error: 'Message is too long.',
+        },
+        400,
+      )
+    }
+
+    // -------------------------------------------------------
+    // Load current user profile
+    // -------------------------------------------------------
+
+    const { data: profile, error: profileError } = await admin
+      .from('profiles')
+      .select('*')
+      .eq('id', user.id)
+      .maybeSingle()
+
+    if (profileError) {
+      console.warn(
+        'Profile lookup failed. Continuing without profile:',
+        profileError,
+      )
+    }
+
+    // -------------------------------------------------------
+    // Load Yahalla Core
+    // -------------------------------------------------------
+
+    const {
+      data: agent,
+      error: agentError,
+    } = await admin
+      .from('agents')
+      .select(
+        'id,key,name_ar,name_de,description,status,configuration',
+      )
+      .eq('key', 'yahalla-core')
+      .eq('status', 'active')
+      .maybeSingle()
+
+    if (agentError) {
+      console.error('Agent lookup failed:', agentError)
+
+      return json(
+        {
+          success: false,
+          error: 'Failed to load Yahalla Core.',
+        },
+        500,
+      )
+    }
+
+    if (!agent) {
+      return json(
+        {
+          success: false,
+          error: 'Yahalla Core agent is not configured.',
+        },
+        503,
+      )
+    }
+
+    // -------------------------------------------------------
+    // Load agent permissions
+    // -------------------------------------------------------
+
+    const { data: permissions, error: permissionsError } = await admin
+      .from('agent_permissions')
+      .select(`
+        permission_id,
+        permissions (
+          id,
+          key
+        )
+      `)
+      .eq('agent_id', agent.id)
+
+    if (permissionsError) {
+      console.error('Permission lookup failed:', permissionsError)
+
+      return json(
+        {
+          success: false,
+          error: 'Failed to load agent permissions.',
+        },
+        500,
+      )
+    }
+
+    // -------------------------------------------------------
+    // Load enabled tools
+    // -------------------------------------------------------
+
+    const { data: tools, error: toolsError } = await admin
+      .from('agent_tools')
+      .select(`
+        enabled,
+        tool_id,
+        tools (
+          id,
+          key,
+          category,
+          status,
+          requires_approval
+        )
+      `)
+      .eq('agent_id', agent.id)
+      .eq('enabled', true)
+
+    if (toolsError) {
+      console.error('Tool lookup failed:', toolsError)
+
+      return json(
+        {
+          success: false,
+          error: 'Failed to load agent tools.',
+        },
+        500,
+      )
+    }
+
+    // -------------------------------------------------------
+    // Load recent memory
+    // -------------------------------------------------------
+
+    const { data: memories, error: memoryError } = await admin
+      .from('ai_memory')
+      .select('*')
+      .eq('scope', 'global')
+      .order('importance', { ascending: false })
+      .limit(20)
+
+    if (memoryError) {
+      console.error('Memory lookup failed:', memoryError)
+
+      return json(
+        {
+          success: false,
+          error: 'Failed to load AI memory.',
+        },
+        500,
+      )
+    }
+
+    // -------------------------------------------------------
+    // Create task
+    // -------------------------------------------------------
+
+    const { data: task, error: taskError } = await admin
+      .from('tasks')
+      .insert({
+        requested_by: user.id,
+        assigned_agent: agent.id,
+        title: message.slice(0, 120),
+        description: message,
+        status: 'pending',
+      })
+      .select('*')
+      .single()
+
+    if (taskError) {
+      console.error('Task creation failed:', taskError)
+
+      return json(
+        {
+          success: false,
+          error: 'Failed to create task.',
+          details: taskError.message,
+          code: taskError.code ?? null,
+          hint: taskError.hint ?? null,
+          details_raw: taskError.details ?? null,
+        },
+        500,
+      )
+    }
+
+    // -------------------------------------------------------
+    // Audit log
+    // -------------------------------------------------------
+
+    const { error: auditError } = await admin
+      .from('audit_logs')
+      .insert({
+        actor_id: user.id,
+        action: 'ai.request',
+        entity_type: 'task',
+        entity_id: task.id,
+        metadata: {
+          agent: agent.key,
+          message_length: message.length,
+        },
+      })
+
+    if (auditError) {
+      console.error('Audit log failed:', auditError)
+    }
+
+    // -------------------------------------------------------
+    // Current phase:
+    // Orchestration infrastructure is ready.
+    // Real LLM execution will be connected next.
+    // -------------------------------------------------------
+
+    return json({
+      success: true,
+
+      task_id: task.id,
+
+      agent: {
+        id: agent.id,
+        key: agent.key,
+        name_ar: agent.name_ar,
+        name_de: agent.name_de,
+        status: agent.status,
+      },
+
+      user: {
+        id: user.id,
+        email: user.email ?? null,
+        profile: profile ?? null,
+      },
+
+      permissions: permissions ?? [],
+
+      tools: tools ?? [],
+
+      memory_count: memories?.length ?? 0,
+
+      status: 'accepted',
+
+      message:
+        'Request accepted by Yahalla AI Core. LLM orchestration will be connected in the next phase.',
+    })
+  } catch (error) {
+    console.error('Yahalla AI error:', error)
+
+    return json(
+      {
+        success: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Internal server error.',
+      },
+      500,
+    )
+  }
+})
