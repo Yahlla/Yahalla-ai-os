@@ -418,7 +418,26 @@ Deno.serve(async (req) => {
             item.tools?.configuration ?? {},
         }))
         .filter((tool: any) => tool.key)
-
+const llmTools =
+  availableTools.map((tool: any) => ({
+    type: 'function',
+    function: {
+      name: tool.key,
+      description:
+        tool.key === 'yahalla.read'
+          ? 'Read data from Yahalla.'
+          : tool.key === 'github.read'
+            ? 'Read information from GitHub.'
+            : tool.key === 'web.search'
+              ? 'Search the public web.'
+              : `Use the ${tool.key} tool.`,
+      parameters: {
+        type: 'object',
+        properties: {},
+        additionalProperties: true,
+      },
+    },
+  }))
     const memoryContext =
       (memories ?? []).map((memory: any) => ({
         key: memory.memory_key,
@@ -493,7 +512,7 @@ Important rules:
         configuration: agent.configuration,
       },
       permissions: permissionKeys,
-      tools: availableTools,
+      tools: llmTools,
       memory: memoryContext,
     }
 
