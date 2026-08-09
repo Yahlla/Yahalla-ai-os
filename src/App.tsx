@@ -23,7 +23,7 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-
+import './App.css'
 import { supabase } from './lib/supabase'
 import { signIn, signOut } from './lib/auth'
 
