@@ -17,6 +17,7 @@ import {
   Send,
   Settings,
   Shield,
+  ShieldCheck,
   Sparkles,
   Terminal,
   Wrench,
@@ -146,6 +147,7 @@ const navigation = [
   { label: 'Tools', icon: Wrench },
   { label: 'Permissions', icon: Shield },
   { label: 'Tasks', icon: FileText },
+  { label: 'Approvals', icon: ShieldCheck },
   { label: 'Settings', icon: Settings },
 ]
 
@@ -256,8 +258,9 @@ function ControlCenter({
       setLastResult(result)
 
       const assistantContent =
+        result?.answer ||
         result?.message ||
-        'Die Anfrage wurde von Yahalla AI Core angenommen.'
+        'Yahalla AI Core did not return an answer.'
 
       const assistantMessage: ChatMessage = {
         id: crypto.randomUUID(),
