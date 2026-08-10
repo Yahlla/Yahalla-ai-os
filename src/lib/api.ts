@@ -152,7 +152,7 @@ export async function sendChatMessage(params: {
   agent_key?: string
   model_id?: string
 }): Promise<ChatResponse> {
-  const { data: session } = await supabase.auth.getSession()
+  const { data: { session } } = await supabase.auth.getSession()
   if (!session?.access_token) {
     throw new Error('No active authentication session.')
   }
@@ -181,7 +181,7 @@ export async function approveToolExecution(
   action: 'approve' | 'reject',
   decisionNote?: string,
 ): Promise<ChatResponse> {
-  const { data: session } = await supabase.auth.getSession()
+  const { data: { session } } = await supabase.auth.getSession()
   if (!session?.access_token) {
     throw new Error('No active authentication session.')
   }

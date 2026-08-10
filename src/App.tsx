@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Activity, CircleAlert as AlertCircle, Bot, Brain, Check, ChevronRight, Circle as CircleHelp, Clock, Cpu, Database, FileText, FolderKanban, HardDrive, Hash, LogOut, Menu, MessageSquare, Monitor, Network, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
+import { Activity, Bot, Check, ChevronRight, Circle as CircleHelp, Cpu, FileText, FolderKanban, LogOut, Menu, MessageSquare, Monitor, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
 import './App.css'
 import { supabase } from './lib/supabase'
 import { signIn, signOut, signUp } from './lib/auth'
@@ -10,7 +10,6 @@ import type {
   Approval,
   AuditLog,
   ChatResponse,
-  ConversationMessage,
   Model,
   Permission,
   Profile,
@@ -22,12 +21,14 @@ import type {
 
 type Page =
   | 'Chat'
+  | 'Overview'
   | 'Projects'
   | 'Tasks'
   | 'Agents'
   | 'Tools'
   | 'Models'
   | 'Servers'
+  | 'Approvals'
   | 'Permissions'
   | 'Users'
   | 'Logs'
@@ -893,7 +894,7 @@ type ChatMessage = {
   error?: boolean
 }
 
-function ChatSection({ profile }: { profile: Profile }) {
+function ChatSection() {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'welcome',
@@ -1236,10 +1237,12 @@ const userNav: NavItem[] = [
 ]
 
 const adminNav: NavItem[] = [
+  { label: 'Overview', icon: Activity, adminOnly: true },
   { label: 'Agents', icon: Bot, adminOnly: true },
   { label: 'Tools', icon: Wrench, adminOnly: true },
   { label: 'Models', icon: Cpu, adminOnly: true },
   { label: 'Servers', icon: Server, adminOnly: true },
+  { label: 'Approvals', icon: ShieldCheck, adminOnly: true },
   { label: 'Permissions', icon: Shield, adminOnly: true },
   { label: 'Users', icon: Users, adminOnly: true },
   { label: 'Logs', icon: Activity, adminOnly: true },
@@ -1267,7 +1270,9 @@ function ControlCenter({
   function renderPage() {
     switch (active) {
       case 'Chat':
-        return <ChatSection profile={profile} />
+        return <ChatSection />
+      case 'Overview':
+        return <OverviewSection profile={profile} />
       case 'Projects':
         return <ProjectsSection />
       case 'Tasks':
@@ -1280,6 +1285,8 @@ function ControlCenter({
         return <ModelsSection />
       case 'Servers':
         return <ServersSection />
+      case 'Approvals':
+        return <ApprovalsSection />
       case 'Permissions':
         return <PermissionsSection />
       case 'Users':
@@ -1291,7 +1298,7 @@ function ControlCenter({
       case 'Settings':
         return <SettingsSection />
       default:
-        return <ChatSection profile={profile} />
+        return <ChatSection />
     }
   }
 
