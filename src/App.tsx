@@ -68,7 +68,9 @@ function Login() {
       return
     }
 
-    window.location.reload()
+    // onAuthStateChange in the parent App component will pick up the
+    // new session and load the profile automatically.
+    setLoading(false)
   }
 
   return (
@@ -1414,34 +1416,51 @@ function App() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    let cancelled = false
+
+    async function loadProfile(userId: string) {
+      // The trigger may take a moment to create the profile row;
+      // retry a few times before giving up.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', userId)
+          .maybeSingle()
+        if (!error && data) {
+          if (!cancelled) setProfile(data as Profile)
+          return
+        }
+        await new Promise((r) => setTimeout(r, 300))
+      }
+    }
+
     async function init() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
         return
       }
-
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', user.id)
-        .maybeSingle()
-
-      if (!error && data) {
-        setProfile(data as Profile)
-      }
-      setLoading(false)
+      await loadProfile(user.id)
+      if (!cancelled) setLoading(false)
     }
 
     init()
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!session?.user) {
-        setProfile(null)
+      if (session?.user) {
+        loadProfile(session.user.id).then(() => {
+          if (!cancelled) setLoading(false)
+        })
+      } else {
+        if (!cancelled) setProfile(null)
       }
     })
 
-    return () => subscription.unsubscribe()
+    return () => {
+      cancelled = true
+      subscription.unsubscribe()
+    }
   }, [])
 
   async function handleLogout() {
