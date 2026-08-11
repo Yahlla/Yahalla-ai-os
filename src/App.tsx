@@ -7,6 +7,7 @@ import { signIn, signOut, signUp } from './lib/auth'
 import * as api from './lib/api'
 import * as localRuntime from './lib/localRuntime'
 import * as browserRuntime from './lib/browserRuntime'
+import * as platformApi from './lib/platformApi'
 import type { BrowserChatMessage } from './lib/browserLLM'
 import type {
   Agent,
@@ -1495,6 +1496,12 @@ function ChatSection() {
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [conversationId, setConversationId] = useState<string | null>(null)
+  // Separate from conversationId above (which tracks the legacy Supabase
+  // cloud-routed conversation, a different database entirely) -- this is
+  // the Strato-hosted conversation this chat's history is actually being
+  // persisted to, independent of which of the three tiers is answering
+  // any given message.
+  const [platformConversationId, setPlatformConversationId] = useState<string | null>(null)
   const [agents, setAgents] = useState<Agent[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [selectedAgent, setSelectedAgent] = useState('yahalla-core')
@@ -1555,6 +1562,41 @@ function ChatSection() {
   useEffect(() => {
     api.getAgents().then((a) => setAgents(a.filter((x) => x.status === 'active')))
     api.getModels().then((m) => setModels(m.filter((x) => x.enabled)))
+  }, [])
+
+  // Conversation history persists on Strato (platformApi), independent of
+  // which inference tier answers any given message -- reload it once on
+  // mount so it survives a page refresh or signing in from another
+  // device, instead of only ever living in this tab's React state. A
+  // no-op (falls straight through to the default welcome message) when
+  // VITE_PLATFORM_API_URL isn't configured.
+  useEffect(() => {
+    let cancelled = false
+    async function loadHistory() {
+      if (!platformApi.isPlatformApiConfigured()) return
+      const conversations = await platformApi.listConversations()
+      const latest = conversations[0]
+      if (!latest) return
+      const persisted = await platformApi.getConversationMessages(latest.id)
+      if (cancelled || persisted.length === 0) return
+      setMessages(
+        persisted
+          .filter((m): m is typeof m & { role: 'user' | 'assistant' } => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            createdAt: new Date(m.created_at),
+            toolActivity: m.tool_activity,
+            agent: m.role === 'assistant' ? 'yahalla-core' : undefined,
+          })),
+      )
+      setPlatformConversationId(latest.id)
+    }
+    loadHistory()
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   // The one-time browser model download used to only start the moment the
@@ -1779,6 +1821,30 @@ function ChatSection() {
 
       const newArtifacts = extractArtifacts(finalMessageId, assistantContent)
       if (newArtifacts.length > 0) setActiveArtifactId(newArtifacts[newArtifacts.length - 1]!.id)
+
+      // Persisted on Strato independently of which tier answered --
+      // deliberately not awaited: persistence latency must never be what
+      // a "send" is waiting on, and a failure here (platform-api
+      // unreachable, not configured, ...) shouldn't surface as a chat
+      // error since the reply the user actually asked for already
+      // succeeded.
+      if (platformApi.isPlatformApiConfigured()) {
+        void (async () => {
+          let convId = platformConversationId
+          if (!convId) {
+            const created = await platformApi.createConversation(message.slice(0, 60))
+            if (!created) return
+            convId = created.id
+            setPlatformConversationId(created.id)
+          }
+          await platformApi.appendMessage(convId, { role: 'user', content: message })
+          await platformApi.appendMessage(convId, {
+            role: 'assistant',
+            content: assistantContent,
+            tool_activity: result.executed_tools as { tool: string; result: Record<string, unknown> }[] | undefined,
+          })
+        })()
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
       setError(msg)
@@ -1810,6 +1876,7 @@ function ChatSection() {
       },
     ])
     setConversationId(null)
+    setPlatformConversationId(null)
     setLastResult(null)
     setError('')
     setInput('')

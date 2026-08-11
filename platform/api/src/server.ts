@@ -207,6 +207,88 @@ export function createPlatformServer(config: PlatformConfig) {
         return send(res, 200, { success: true, status: decision })
       }
 
+      // Conversation persistence -- chat history lives on Strato (the
+      // conversations/conversation_messages tables and their RLS policies
+      // already exist verbatim from supabase/migrations, applied to this
+      // self-hosted DB the same way as everything else), not only in the
+      // browser tab's React state, so it survives a reload or a different
+      // device signing into the same account. Storing text is ordinary,
+      // cheap work -- nothing here is a model call.
+      if (path === '/conversations' && req.method === 'GET') {
+        const rows = await withUserSession(identity.userId, (client) =>
+          client.query(
+            "SELECT * FROM conversations WHERE status <> 'deleted' ORDER BY updated_at DESC LIMIT 50",
+          ),
+        )
+        return send(res, 200, { conversations: rows.rows })
+      }
+
+      if (path === '/conversations' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const created = await withUserSession(identity.userId, (client) =>
+          client.query(
+            `INSERT INTO conversations (owner_id, project_id, title)
+             VALUES ($1, $2, $3) RETURNING *`,
+            [
+              identity.userId,
+              typeof body.project_id === 'string' ? body.project_id : null,
+              typeof body.title === 'string' && body.title.trim() ? body.title.trim() : 'New conversation',
+            ],
+          ),
+        )
+        return send(res, 200, { success: true, conversation: created.rows[0] })
+      }
+
+      const conversationMessagesMatch = path.match(/^\/conversations\/([^/]+)\/messages$/)
+      if (conversationMessagesMatch && req.method === 'GET') {
+        const rows = await withUserSession(identity.userId, (client) =>
+          client.query(
+            'SELECT * FROM conversation_messages WHERE conversation_id = $1 ORDER BY created_at ASC LIMIT 500',
+            [conversationMessagesMatch[1]],
+          ),
+        )
+        return send(res, 200, { messages: rows.rows })
+      }
+
+      if (conversationMessagesMatch && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const role = String(body.role ?? '')
+        if (!['user', 'assistant', 'system', 'tool'].includes(role)) {
+          return send(res, 400, { success: false, error: 'role must be one of user, assistant, system, tool.' })
+        }
+        const conversationId = conversationMessagesMatch[1]
+        const created = await withUserSession(identity.userId, async (client) => {
+          // Checked explicitly (rather than letting a mismatched id hit
+          // conversation_messages' RLS WITH CHECK) so an unowned or
+          // nonexistent conversation gets a clean 404 instead of a raw
+          // RLS-violation exception -- INSERT's WITH CHECK throws on
+          // failure, it doesn't just return zero rows the way this
+          // UPDATE's USING clause does. Doing the ownership check and the
+          // insert in the same transaction also means the insert's own
+          // WITH CHECK is guaranteed to pass once we get this far.
+          const owned = await client.query(
+            "UPDATE conversations SET updated_at = now() WHERE id = $1 AND status <> 'deleted' RETURNING id",
+            [conversationId],
+          )
+          if (owned.rowCount === 0) return null
+          return client.query(
+            `INSERT INTO conversation_messages (conversation_id, role, content, tool_activity, metadata)
+             VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+            [
+              conversationId,
+              role,
+              typeof body.content === 'string' ? body.content : '',
+              JSON.stringify(Array.isArray(body.tool_activity) ? body.tool_activity : []),
+              JSON.stringify(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
+            ],
+          )
+        })
+        if (!created) {
+          return send(res, 404, { success: false, error: 'Conversation not found.' })
+        }
+        return send(res, 200, { success: true, message: created.rows[0] })
+      }
+
       // Central, cross-device semantic memory -- the embedding itself is
       // computed on the caller's own device (browser/local-runtime) and
       // sent here as a plain float array; this route only ever stores and

@@ -1,0 +1,77 @@
+import { supabase } from './supabase'
+
+// Optional: the self-hosted Strato control plane (platform/api). Chat
+// keeps working with purely local state when this isn't configured --
+// every function here degrades to a no-op rather than throwing, so a
+// deployment without a Strato server yet (or one where it's briefly
+// unreachable) never breaks the chat itself, only the "remembers across
+// reloads" part of it.
+const PLATFORM_API_URL = import.meta.env.VITE_PLATFORM_API_URL as string | undefined
+
+export function isPlatformApiConfigured(): boolean {
+  return Boolean(PLATFORM_API_URL)
+}
+
+async function authHeader(): Promise<Record<string, string> | null> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+  if (!session?.access_token) return null
+  return { Authorization: `Bearer ${session.access_token}` }
+}
+
+async function platformFetch(path: string, init: RequestInit = {}): Promise<Response | null> {
+  if (!PLATFORM_API_URL) return null
+  try {
+    const headers = await authHeader()
+    if (!headers) return null
+    return await fetch(`${PLATFORM_API_URL}${path}`, {
+      ...init,
+      headers: { 'Content-Type': 'application/json', ...headers, ...init.headers },
+    })
+  } catch {
+    return null
+  }
+}
+
+export type PersistedConversation = { id: string; title: string; updated_at: string }
+export type PersistedMessage = {
+  id: string
+  conversation_id: string
+  role: 'user' | 'assistant' | 'system' | 'tool'
+  content: string
+  tool_activity: { tool: string; result: Record<string, unknown> }[]
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+export async function listConversations(): Promise<PersistedConversation[]> {
+  const res = await platformFetch('/conversations')
+  if (!res?.ok) return []
+  const data = (await res.json()) as { conversations?: PersistedConversation[] }
+  return data.conversations ?? []
+}
+
+export async function createConversation(title?: string): Promise<PersistedConversation | null> {
+  const res = await platformFetch('/conversations', { method: 'POST', body: JSON.stringify({ title }) })
+  if (!res?.ok) return null
+  const data = (await res.json()) as { conversation?: PersistedConversation }
+  return data.conversation ?? null
+}
+
+export async function getConversationMessages(conversationId: string): Promise<PersistedMessage[]> {
+  const res = await platformFetch(`/conversations/${conversationId}/messages`)
+  if (!res?.ok) return []
+  const data = (await res.json()) as { messages?: PersistedMessage[] }
+  return data.messages ?? []
+}
+
+// Fire-and-forget by design at the call site: persistence should never
+// make the chat itself feel slower or fail a send that otherwise
+// succeeded locally.
+export async function appendMessage(
+  conversationId: string,
+  message: { role: 'user' | 'assistant'; content: string; tool_activity?: { tool: string; result: Record<string, unknown> }[]; metadata?: Record<string, unknown> },
+): Promise<void> {
+  await platformFetch(`/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify(message) })
+}

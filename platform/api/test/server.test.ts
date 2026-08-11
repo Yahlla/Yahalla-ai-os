@@ -260,3 +260,76 @@ test('a stranger cannot see or search another user\'s memory entries (RLS isolat
   assert.equal(search.status, 200)
   assert.equal(search.body.results.length, 0)
 })
+
+// Conversation persistence: chat history survives a reload or a different
+// device signing into the same account, backed by the existing
+// conversations/conversation_messages tables and their RLS policies.
+let conversationId: string
+
+test('a human can create a conversation', async () => {
+  const { status, body } = await api('/conversations', { method: 'POST', body: JSON.stringify({ title: 'Test chat' }) }, humanJwt)
+  assert.equal(status, 200)
+  assert.equal(body.conversation.title, 'Test chat')
+  assert.equal(body.conversation.owner_id, humanUserId)
+  conversationId = body.conversation.id
+})
+
+test('the owner sees the new conversation in their list', async () => {
+  const { status, body } = await api('/conversations', {}, humanJwt)
+  assert.equal(status, 200)
+  assert.ok(body.conversations.some((c: any) => c.id === conversationId))
+})
+
+test('messages can be appended and are returned in order', async () => {
+  const first = await api(`/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify({ role: 'user', content: 'hello' }) }, humanJwt)
+  assert.equal(first.status, 200)
+  assert.equal(first.body.message.role, 'user')
+
+  const second = await api(
+    `/conversations/${conversationId}/messages`,
+    { method: 'POST', body: JSON.stringify({ role: 'assistant', content: 'hi there', tool_activity: [{ tool: 'noop', result: {} }] }) },
+    humanJwt,
+  )
+  assert.equal(second.status, 200)
+
+  const list = await api(`/conversations/${conversationId}/messages`, {}, humanJwt)
+  assert.equal(list.status, 200)
+  assert.equal(list.body.messages.length, 2)
+  assert.equal(list.body.messages[0].content, 'hello')
+  assert.equal(list.body.messages[1].content, 'hi there')
+})
+
+test('appending a message also bumps the conversation\'s updated_at', async () => {
+  const before = await api('/conversations', {}, humanJwt)
+  const beforeUpdatedAt = before.body.conversations.find((c: any) => c.id === conversationId).updated_at
+
+  await new Promise((r) => setTimeout(r, 10))
+  await api(`/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify({ role: 'user', content: 'again' }) }, humanJwt)
+
+  const after = await api('/conversations', {}, humanJwt)
+  const afterUpdatedAt = after.body.conversations.find((c: any) => c.id === conversationId).updated_at
+  assert.ok(new Date(afterUpdatedAt) > new Date(beforeUpdatedAt))
+})
+
+test('a stranger cannot append to or list someone else\'s conversation (RLS isolation)', async () => {
+  const strangerId = randomUUID()
+  await getPool().query('INSERT INTO auth.users (id, email) VALUES ($1, $2)', [strangerId, 'convo-stranger@test.local'])
+  const strangerJwt = signTestJwt(strangerId)
+
+  const post = await api(`/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify({ role: 'user', content: 'nope' }) }, strangerJwt)
+  assert.equal(post.status, 404)
+
+  const list = await api(`/conversations/${conversationId}/messages`, {}, strangerJwt)
+  assert.equal(list.status, 200)
+  assert.equal(list.body.messages.length, 0)
+
+  const conversations = await api('/conversations', {}, strangerJwt)
+  assert.equal(conversations.status, 200)
+  assert.equal(conversations.body.conversations.some((c: any) => c.id === conversationId), false)
+})
+
+test('posting a message with an invalid role is rejected', async () => {
+  const { status, body } = await api(`/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify({ role: 'villain', content: 'x' }) }, humanJwt)
+  assert.equal(status, 400)
+  assert.match(body.error, /role/)
+})
