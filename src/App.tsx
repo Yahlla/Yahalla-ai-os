@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Activity, Bot, Check, ChevronRight, Circle as CircleHelp, Code2, Copy, Cpu, Download, FileText, FolderKanban, GitBranch, Laptop, LogOut, Menu, MessageSquare, Mic, MicOff, Monitor, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
+import { Activity, Bot, Camera, Check, ChevronRight, Circle as CircleHelp, Code2, Copy, Cpu, Download, FileText, FolderKanban, GitBranch, Laptop, LogOut, Menu, MessageSquare, Mic, MicOff, Monitor, Paperclip, Plus, RotateCcw, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
 import './App.css'
 import { supabase } from './lib/supabase'
 import { signIn, signOut, signUp } from './lib/auth'
@@ -1305,6 +1305,7 @@ type ChatMessage = {
   toolActivity?: { tool: string; result: Record<string, unknown> }[]
   error?: boolean
   attachments?: { name: string; size: number }[]
+  imageDataUrl?: string
 }
 
 type AttachedFile = { name: string; content: string; size: number }
@@ -1515,6 +1516,12 @@ function ChatSection() {
   const [isListening, setIsListening] = useState(false)
   const [voiceError, setVoiceError] = useState('')
   const voiceRecognizerRef = useRef<VoiceRecognizer | null>(null)
+  const [cameraOpen, setCameraOpen] = useState(false)
+  const [cameraError, setCameraError] = useState('')
+  const [capturedImage, setCapturedImage] = useState<string | null>(null)
+  const [pendingImage, setPendingImage] = useState<string | null>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const cameraStreamRef = useRef<MediaStream | null>(null)
   const [sending, setSending] = useState(false)
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
   const [error, setError] = useState('')
@@ -1540,6 +1547,15 @@ function ChatSection() {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Camera tracks must stop even if the user navigates away mid-capture
+  // (closes the tab, switches pages) -- otherwise the camera light stays
+  // on with no UI left to turn it off from.
+  useEffect(() => {
+    return () => {
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
+    }
+  }, [])
 
   // Fenced code blocks in assistant messages become artifacts, rendered in
   // the side panel instead of inline -- recomputed only when the
@@ -1803,10 +1819,66 @@ function ChatSection() {
     recognizer.start()
   }
 
+  function stopCameraStream() {
+    cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
+    cameraStreamRef.current = null
+  }
+
+  async function openCamera() {
+    setCameraError('')
+    setCapturedImage(null)
+    const granted = await requestMediaPermission('camera')
+    if (!granted) {
+      setCameraError('تم رفض إذن الكاميرا.')
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+      cameraStreamRef.current = stream
+      setCameraOpen(true)
+      // The <video> element only exists once cameraOpen renders it --
+      // assign the stream on the next tick rather than racing the render.
+      setTimeout(() => {
+        if (videoRef.current) videoRef.current.srcObject = stream
+      }, 0)
+    } catch {
+      setCameraError('تعذّر الوصول إلى الكاميرا.')
+    }
+  }
+
+  function capturePhoto() {
+    const video = videoRef.current
+    if (!video || video.videoWidth === 0) return
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.drawImage(video, 0, 0)
+    setCapturedImage(canvas.toDataURL('image/jpeg', 0.85))
+    stopCameraStream()
+  }
+
+  function retakePhoto() {
+    setCapturedImage(null)
+    openCamera()
+  }
+
+  function closeCamera() {
+    stopCameraStream()
+    setCameraOpen(false)
+    setCapturedImage(null)
+  }
+
+  function attachCapturedPhoto() {
+    if (capturedImage) setPendingImage(capturedImage)
+    closeCamera()
+  }
+
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault()
     const typed = input.trim()
-    if ((!typed && attachedFiles.length === 0) || sending) return
+    if ((!typed && attachedFiles.length === 0 && !pendingImage) || sending) return
 
     // Attached files are read client-side (never uploaded anywhere on
     // their own) and folded into the same text sent to whichever tier
@@ -1815,12 +1887,20 @@ function ChatSection() {
     const fileContext = attachedFiles
       .map((f) => `\n\n--- attached file: ${f.name} ---\n\`\`\`\n${f.content}\n\`\`\``)
       .join('')
-    const message = (typed || `(${attachedFiles.length} file(s) attached, no message)`) + fileContext
+    // No vision-capable model is connected in any tier yet -- saying so
+    // explicitly in the prompt itself keeps the model from guessing at or
+    // hallucinating a description of a photo it structurally cannot see,
+    // the same honesty rule as browserRuntime's system prompt.
+    const imageContext = pendingImage
+      ? '\n\n[User attached a photo. No vision-capable model is connected in this build -- you cannot see or describe its contents. Say so plainly if asked about it.]'
+      : ''
+    const message = (typed || `(${attachedFiles.length + (pendingImage ? 1 : 0)} attachment(s), no message)`) + fileContext + imageContext
     const attachmentsForDisplay = attachedFiles.map((f) => ({ name: f.name, size: f.size }))
 
     setInput('')
     setAttachedFiles([])
     setAttachmentError('')
+    setPendingImage(null)
     setError('')
 
     const userMessage: ChatMessage = {
@@ -1829,6 +1909,7 @@ function ChatSection() {
       content: message,
       createdAt: new Date(),
       attachments: attachmentsForDisplay.length > 0 ? attachmentsForDisplay : undefined,
+      imageDataUrl: pendingImage ?? undefined,
     }
 
     setMessages((prev) => [...prev, userMessage])
@@ -2140,6 +2221,9 @@ function ChatSection() {
                       ))}
                     </div>
                   )}
+                  {message.imageDataUrl && (
+                    <img className="message-image" src={message.imageDataUrl} alt="Attached" />
+                  )}
                   <div className={`message-bubble ${message.error ? 'message-error' : ''} ${message.id === streamingMessageId ? 'streaming' : ''}`}>
                     {message.content}
                   </div>
@@ -2226,8 +2310,17 @@ function ChatSection() {
 
           {attachmentError && <div className="composer-error">{attachmentError}</div>}
 
-          {attachedFiles.length > 0 && (
+          {(attachedFiles.length > 0 || pendingImage) && (
             <div className="attachment-chips">
+              {pendingImage && (
+                <span className="attachment-chip image-chip">
+                  <img src={pendingImage} alt="Captured" />
+                  Photo attached (no vision model connected)
+                  <button type="button" onClick={() => setPendingImage(null)} title="Remove">
+                    <X size={11} />
+                  </button>
+                </span>
+              )}
               {attachedFiles.map((f) => (
                 <span key={f.name} className="attachment-chip">
                   <FileText size={12} />
@@ -2241,6 +2334,39 @@ function ChatSection() {
           )}
 
           {voiceError && <div className="composer-error">{voiceError}</div>}
+          {cameraError && <div className="composer-error">{cameraError}</div>}
+
+          {cameraOpen && (
+            <div className="camera-modal">
+              <div className="camera-modal-inner">
+                {capturedImage ? (
+                  <img src={capturedImage} alt="Captured preview" />
+                ) : (
+                  // eslint-disable-next-line jsx-a11y/media-has-caption
+                  <video ref={videoRef} autoPlay playsInline muted />
+                )}
+                <div className="camera-modal-actions">
+                  {capturedImage ? (
+                    <>
+                      <button type="button" className="secondary-button" onClick={retakePhoto}>
+                        <RotateCcw size={14} /> Retake
+                      </button>
+                      <button type="button" className="primary-button" onClick={attachCapturedPhoto}>
+                        <Check size={14} /> Use photo
+                      </button>
+                    </>
+                  ) : (
+                    <button type="button" className="primary-button" onClick={capturePhoto}>
+                      <Camera size={14} /> Capture
+                    </button>
+                  )}
+                  <button type="button" className="secondary-button" onClick={closeCamera}>
+                    <X size={14} /> Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           <form className="composer" onSubmit={sendMessage}>
             <input
@@ -2260,6 +2386,9 @@ function ChatSection() {
               title={isListening ? 'Stop voice input' : 'Voice input'}
             >
               {isListening ? <MicOff size={18} /> : <Mic size={18} />}
+            </button>
+            <button type="button" className="composer-icon camera" onClick={openCamera} title="Take a photo">
+              <Camera size={18} />
             </button>
             <textarea
               ref={textareaRef}
