@@ -1,0 +1,46 @@
+-- Self-hosted equivalent of the pieces of Supabase's "auth" schema the
+-- existing supabase/migrations/*.sql assume: a minimal auth.users table
+-- and an auth.uid() function. Identity itself is still verified by
+-- Supabase Auth (kept deliberately, per the platform plan, to avoid
+-- re-implementing signup/password/session handling) -- platform-api
+-- validates the Supabase-issued JWT itself, then opens its DB session as
+-- the "authenticated" role with request.jwt.claim.sub set to the verified
+-- user id, exactly mirroring how PostgREST/Supabase Edge Functions do it.
+-- This lets every RLS-style policy and auth.uid() call in the ported
+-- migrations run unmodified against this self-hosted database.
+
+CREATE SCHEMA IF NOT EXISTS auth;
+
+CREATE TABLE IF NOT EXISTS auth.users (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email text,
+  raw_user_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
+  LANGUAGE sql STABLE
+  AS $$ SELECT NULLIF(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+
+DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE service_role NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
+GRANT SELECT ON auth.users TO anon, authenticated, service_role;
+GRANT INSERT, UPDATE, DELETE ON auth.users TO service_role;
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+
+-- In real Supabase, service_role's full table access is provisioned by
+-- the platform itself, outside any migration file -- BYPASSRLS bypasses
+-- row *filtering*, it does not imply the base table GRANT Postgres
+-- separately requires (the exact 42501 bug class this project hit and
+-- fixed earlier for "authenticated"; service_role needs the same fix,
+-- just granted here since there's no separate migration that expects to
+-- run after every future table exists). ALTER DEFAULT PRIVILEGES makes
+-- this apply automatically to every table the migrations below create,
+-- without needing to know their names in advance.
+ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public
+  GRANT ALL ON TABLES TO service_role;
+ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public
+  GRANT ALL ON SEQUENCES TO service_role;
