@@ -52,6 +52,7 @@ export function browserModelReady(): boolean {
 export async function sendChatMessage(
   history: BrowserChatMessage[],
   message: string,
+  onToken?: (delta: string) => void,
 ): Promise<ChatResponse & { updatedHistory: BrowserChatMessage[] }> {
   const messages: BrowserChatMessage[] = [
     { role: 'system', content: SYSTEM_PROMPT },
@@ -59,7 +60,7 @@ export async function sendChatMessage(
     { role: 'user', content: message },
   ]
 
-  const answer = await browserChatCompletion(messages)
+  const answer = await browserChatCompletion(messages, onToken)
   const updatedHistory: BrowserChatMessage[] = [
     ...history,
     { role: 'user', content: message },

@@ -1492,6 +1492,7 @@ function ChatSection() {
   ])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [agents, setAgents] = useState<Agent[]>([])
@@ -1629,6 +1630,13 @@ function ChatSection() {
       // makes the three-tier fallback behave the way it's meant to.
       const runtimeHealth = await localRuntime.checkRuntimeHealth()
       let result: ChatResponse
+      // Set only for the browser path: a placeholder assistant message is
+      // inserted up front and filled in token-by-token as the model
+      // generates, the same live-typing behavior ChatGPT has, instead of
+      // a static "processing" state that only updates once at the very
+      // end. The other two tiers are plain non-streaming REST calls and
+      // still append their message the old way, after the fact.
+      let streamingMessageId: string | null = null
 
       if (runtimeHealth?.llm_reachable) {
         setRuntimeTier('local')
@@ -1664,9 +1672,24 @@ function ChatSection() {
           setModelLoadProgress(null)
           setModelLoadStalled(false)
         }
-        const browserResult = await browserRuntime.sendChatMessage(browserHistoryRef.current, message)
-        browserHistoryRef.current = browserResult.updatedHistory
-        result = browserResult
+
+        streamingMessageId = crypto.randomUUID()
+        const idForClosure = streamingMessageId
+        setMessages((prev) => [
+          ...prev,
+          { id: idForClosure, role: 'assistant', content: '', createdAt: new Date(), agent: 'yahalla-core' },
+        ])
+
+        setStreamingMessageId(idForClosure)
+        try {
+          const browserResult = await browserRuntime.sendChatMessage(browserHistoryRef.current, message, (delta) => {
+            setMessages((prev) => prev.map((m) => (m.id === idForClosure ? { ...m, content: m.content + delta } : m)))
+          })
+          browserHistoryRef.current = browserResult.updatedHistory
+          result = browserResult
+        } finally {
+          setStreamingMessageId(null)
+        }
       } else {
         setRuntimeTier('cloud')
         result = await api.sendChatMessage({
@@ -1688,19 +1711,34 @@ function ChatSection() {
         result.error ||
         'Yahalla AI Core did not return an answer.'
 
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: assistantContent,
-        createdAt: new Date(),
-        taskId: result.task_id,
-        agent: result.agent?.key,
-        toolActivity: result.executed_tools as { tool: string; result: Record<string, unknown> }[],
-        error: !result.success,
+      const finalMessageId = streamingMessageId ?? crypto.randomUUID()
+
+      if (streamingMessageId) {
+        // Already streamed in incrementally -- just reconcile the final
+        // metadata (error flag, task id) onto the same message rather
+        // than appending a second one.
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === streamingMessageId
+              ? { ...m, content: assistantContent, taskId: result.task_id, agent: result.agent?.key, error: !result.success }
+              : m,
+          ),
+        )
+      } else {
+        const assistantMessage: ChatMessage = {
+          id: finalMessageId,
+          role: 'assistant',
+          content: assistantContent,
+          createdAt: new Date(),
+          taskId: result.task_id,
+          agent: result.agent?.key,
+          toolActivity: result.executed_tools as { tool: string; result: Record<string, unknown> }[],
+          error: !result.success,
+        }
+        setMessages((prev) => [...prev, assistantMessage])
       }
 
-      setMessages((prev) => [...prev, assistantMessage])
-      const newArtifacts = extractArtifacts(assistantMessage.id, assistantMessage.content)
+      const newArtifacts = extractArtifacts(finalMessageId, assistantContent)
       if (newArtifacts.length > 0) setActiveArtifactId(newArtifacts[newArtifacts.length - 1]!.id)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -1866,7 +1904,7 @@ function ChatSection() {
                       })}
                     </span>
                   </div>
-                  <div className={`message-bubble ${message.error ? 'message-error' : ''}`}>
+                  <div className={`message-bubble ${message.error ? 'message-error' : ''} ${message.id === streamingMessageId ? 'streaming' : ''}`}>
                     {message.content}
                   </div>
                   {message.taskId && (
@@ -1899,7 +1937,7 @@ function ChatSection() {
               </div>
             ))}
 
-            {sending && (
+            {sending && !streamingMessageId && (
               <div className="message-row assistant">
                 <div className="message-avatar">
                   <Sparkles size={16} />

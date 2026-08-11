@@ -1429,6 +1429,22 @@ button {
   background: linear-gradient(135deg, rgba(112,99,255,.17), rgba(255,255,255,.065));
 }
 
+.message-bubble.streaming::after {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent-2, #5ee0ff);
+  animation: streaming-cursor 0.9s steps(1) infinite;
+}
+
+@keyframes streaming-cursor {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
 .message-error {
   border-color: rgba(239,68,68,.15) !important;
   color: #fca5a5 !important;

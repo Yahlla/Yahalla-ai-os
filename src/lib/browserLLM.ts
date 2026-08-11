@@ -33,14 +33,17 @@ async function pickModelId(): Promise<string> {
     // "advanced" was the explicit requirement, not just "responds".
     .sort((a, b) => (b.vram_required_MB ?? 0) - (a.vram_required_MB ?? 0))
 
-  // Biased toward a fast first download, not maximum quality: this is the
-  // path a brand-new visitor with no local-runtime hits, so the priority
-  // is "finishes downloading and answers quickly" over "the single best
-  // model that technically fits in VRAM" -- a multi-GB first download on
-  // an average connection reads as broken, not just slow. Users who want
-  // the strongest local model should run local-runtime instead (small,
-  // fast to fetch, no browser download at all).
-  const ceilingMB = isLikelyPhone() ? 1200 : 2000
+  // A real floor, not just "smallest that downloads fast": the ~1.5B
+  // class was tried first and is genuinely too weak for real use in
+  // Arabic specifically -- it mixes in tokens from the model's stronger
+  // languages (Chinese/English) mid-sentence and degrades into generic
+  // filler across multi-turn context. Raising the ceiling into 3B-class
+  // territory (~1.5-2.5GB for a Q4 model) is still a one-time download
+  // that finishes in a reasonable time on an average connection, and is
+  // a meaningfully more capable and coherent model -- not just larger.
+  // Users who want the strongest fully-local model should still run
+  // local-runtime (up to 7B, no browser download at all).
+  const ceilingMB = isLikelyPhone() ? 2000 : 3200
   const withinBudget = candidates.filter((m) => (m.vram_required_MB ?? 0) <= ceilingMB)
   const picked = withinBudget[0] ?? candidates[candidates.length - 1]
   if (!picked) throw new Error('No compatible local model found in the WebLLM catalog.')
@@ -92,11 +95,43 @@ export function getLoadedModelId(): string | null {
 
 export type BrowserChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
 
-export async function browserChatCompletion(messages: BrowserChatMessage[]): Promise<string> {
+// Lower temperature + a repetition penalty measurably cuts down on the
+// "collapses into generic filler" failure mode small models are prone to
+// over a multi-turn conversation -- it doesn't fix the underlying capacity
+// limit, but it does make the model commit to an actual answer more often
+// instead of hedging into the same safe-sounding non-answer every turn.
+const GENERATION_PARAMS = {
+  temperature: 0.6,
+  repetition_penalty: 1.15,
+  max_tokens: 768,
+}
+
+// Streams tokens as they're generated (onToken) instead of blocking until
+// the full answer is ready -- this is what lets the UI show live
+// "typing," the same visible-progress ChatGPT has, rather than a static
+// "processing" state that only updates once at the very end.
+export async function browserChatCompletion(
+  messages: BrowserChatMessage[],
+  onToken?: (delta: string) => void,
+): Promise<string> {
   if (!loadingPromise) throw new Error('Local browser model is not loaded yet. Call loadBrowserModel() first.')
   const engine = await loadingPromise
-  const completion = await engine.chat.completions.create({ messages, stream: false })
-  return completion.choices[0]?.message?.content ?? ''
+
+  if (!onToken) {
+    const completion = await engine.chat.completions.create({ messages, stream: false, ...GENERATION_PARAMS })
+    return completion.choices[0]?.message?.content ?? ''
+  }
+
+  const stream = await engine.chat.completions.create({ messages, stream: true, ...GENERATION_PARAMS })
+  let full = ''
+  for await (const chunk of stream) {
+    const delta = chunk.choices[0]?.delta?.content ?? ''
+    if (delta) {
+      full += delta
+      onToken(delta)
+    }
+  }
+  return full
 }
 
 export async function unloadBrowserModel(): Promise<void> {
