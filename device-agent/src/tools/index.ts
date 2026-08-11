@@ -1,5 +1,5 @@
 import { listProjectFiles, patchProjectFile, readProjectFile, writeProjectFile, type ToolResult } from './files.js'
-import { gitDiff, gitStatus } from './git.js'
+import { gitCommit, gitCreateBranch, gitDiff, gitPush, gitStatus } from './git.js'
 import { runProjectCommand } from './run_command.js'
 import { PathEscapeError } from './sandbox.js'
 
@@ -16,6 +16,9 @@ const REGISTRY: Record<string, DeviceToolExecutor> = {
   patch_project_file: (root, args) => patchProjectFile(root, args),
   git_status: (root) => gitStatus(root),
   git_diff: (root, args) => gitDiff(root, args),
+  git_create_branch: (root, args) => gitCreateBranch(root, args),
+  git_commit: (root, args) => gitCommit(root, args),
+  git_push: (root, args) => gitPush(root, args),
   run_project_command: (root, args, config) => {
     const allowlist = Array.isArray(config?.allowlist)
       ? config.allowlist.map(String)

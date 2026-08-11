@@ -182,12 +182,18 @@ function toolDescription(key: string): string {
       return 'Show unstaged or staged changes in the project git repository, optionally scoped to one path. Read-only.'
     case 'run_project_command':
       return 'Run an allowlisted command (see the tool configuration) in the project directory. Requires approval.'
+    case 'git_create_branch':
+      return 'Create and switch to a new local git branch, on the device where the project is checked out.'
+    case 'git_commit':
+      return 'Stage all changes and create a git commit, on the device where the project is checked out. Requires approval.'
+    case 'git_push':
+      return 'Push the current (or given) branch to the "origin" remote, on the device where the project is checked out. Pass remote_url to point origin at a repository for the first time (e.g. one just created with github.write). Uses whatever git credentials are already configured on that machine -- never ask the user to paste a token here. Requires approval.'
     case 'web.search':
       return 'Search publicly available web information.'
     case 'github.read':
-      return 'Read authorized GitHub repository information. Read-only.'
+      return 'Read authorized GitHub data. operation="list_repos" lists the user\'s existing repositories (use this to offer a choice before creating a new one). Read-only.'
     case 'github.write':
-      return 'Modify authorized GitHub repository content. Requires approval.'
+      return 'Modify authorized GitHub data. operation="create_repo" creates a new repository under the user\'s account and returns its clone URLs for use with git_push. Requires approval.'
     case 'email.send':
       return 'Send an email. Requires approval.'
     case 'yahalla.api':
@@ -274,6 +280,63 @@ function toolParameterSchema(key: string): Record<string, unknown> {
           },
         },
         required: ['command'],
+        additionalProperties: false,
+      }
+
+    case 'git_create_branch':
+      return {
+        type: 'object',
+        properties: {
+          branch: { type: 'string', description: 'New branch name.' },
+        },
+        required: ['branch'],
+        additionalProperties: false,
+      }
+
+    case 'git_commit':
+      return {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'Commit message.' },
+        },
+        required: ['message'],
+        additionalProperties: false,
+      }
+
+    case 'git_push':
+      return {
+        type: 'object',
+        properties: {
+          branch: { type: 'string', description: 'Branch to push. Defaults to the current branch.' },
+          remote_url: {
+            type: 'string',
+            description: 'https:// or git@ URL to set as "origin" before pushing (e.g. from a github.write create_repo result). Omit if origin is already configured.',
+          },
+        },
+        additionalProperties: false,
+      }
+
+    case 'github.read':
+      return {
+        type: 'object',
+        properties: {
+          operation: { type: 'string', enum: ['list_repos'], description: 'Which GitHub read operation to perform.' },
+          query: { type: 'string', description: 'Optional: filter repositories whose name contains this text.' },
+        },
+        required: ['operation'],
+        additionalProperties: false,
+      }
+
+    case 'github.write':
+      return {
+        type: 'object',
+        properties: {
+          operation: { type: 'string', enum: ['create_repo'], description: 'Which GitHub write operation to perform.' },
+          name: { type: 'string', description: 'Repository name for create_repo.' },
+          private: { type: 'boolean', description: 'Create the repository as private. Defaults to true.' },
+          description: { type: 'string', description: 'Optional repository description.' },
+        },
+        required: ['operation', 'name'],
         additionalProperties: false,
       }
 
@@ -615,6 +678,140 @@ async function executeYahallaRead(
   }
 }
 
+// GitHub API calls run inline in the edge function (it can reach
+// api.github.com from Supabase's cloud, unlike the user's own machine) and
+// use a GitHub personal access token stored as the YAHALLA_GITHUB_TOKEN
+// secret. This never touches the local git checkout -- committing and
+// pushing real code is device-scoped (git_commit/git_push in
+// device-agent/src/tools/git.ts), using whatever git credentials are
+// already configured on that machine. These two only talk to the GitHub
+// API itself: listing repos to choose from, and creating a new one.
+async function executeGithubRead(args: Record<string, unknown>) {
+  const token = Deno.env.get('YAHALLA_GITHUB_TOKEN')
+  if (!token) {
+    return {
+      success: false,
+      operation: 'github.read',
+      message: 'GitHub integration is not configured. Set the YAHALLA_GITHUB_TOKEN secret (a GitHub personal access token with repo scope) to enable it.',
+    }
+  }
+
+  const operation = String(args.operation ?? '')
+
+  if (operation === 'list_repos') {
+    const query = typeof args.query === 'string' ? args.query.toLowerCase() : ''
+    const response = await fetch('https://api.github.com/user/repos?per_page=50&sort=updated', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'yahalla-ai-os',
+      },
+    })
+    const text = await response.text()
+    if (!response.ok) {
+      return {
+        success: false,
+        operation: 'github.read',
+        status: response.status,
+        message: 'GitHub API request failed.',
+        details: text.slice(0, 2000),
+      }
+    }
+    let repos: any[] = []
+    try {
+      repos = JSON.parse(text)
+    } catch {
+      repos = []
+    }
+    const filtered = query
+      ? repos.filter((r) => String(r?.name ?? '').toLowerCase().includes(query))
+      : repos
+    return {
+      success: true,
+      operation: 'github.read',
+      count: filtered.length,
+      repos: filtered.map((r) => ({
+        name: r.name,
+        full_name: r.full_name,
+        private: r.private,
+        html_url: r.html_url,
+        clone_url: r.clone_url,
+        ssh_url: r.ssh_url,
+        default_branch: r.default_branch,
+        updated_at: r.updated_at,
+      })),
+    }
+  }
+
+  return { success: false, operation: 'github.read', message: `Unsupported operation "${operation}".` }
+}
+
+async function executeGithubWrite(args: Record<string, unknown>) {
+  const token = Deno.env.get('YAHALLA_GITHUB_TOKEN')
+  if (!token) {
+    return {
+      success: false,
+      operation: 'github.write',
+      message: 'GitHub integration is not configured. Set the YAHALLA_GITHUB_TOKEN secret (a GitHub personal access token with repo scope) to enable it.',
+    }
+  }
+
+  const operation = String(args.operation ?? '')
+
+  if (operation === 'create_repo') {
+    const name = String(args.name ?? '').trim()
+    if (!name) {
+      return { success: false, operation: 'github.write', message: 'name is required.' }
+    }
+
+    const response = await fetch('https://api.github.com/user/repos', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'yahalla-ai-os',
+      },
+      body: JSON.stringify({
+        name,
+        private: args.private !== false,
+        description: typeof args.description === 'string' ? args.description : undefined,
+      }),
+    })
+    const text = await response.text()
+    if (!response.ok) {
+      return {
+        success: false,
+        operation: 'github.write',
+        status: response.status,
+        message: 'GitHub API request failed.',
+        details: text.slice(0, 2000),
+      }
+    }
+    let repo: any = {}
+    try {
+      repo = JSON.parse(text)
+    } catch {
+      repo = {}
+    }
+    return {
+      success: true,
+      operation: 'github.write',
+      repo: {
+        name: repo.name,
+        full_name: repo.full_name,
+        private: repo.private,
+        html_url: repo.html_url,
+        clone_url: repo.clone_url,
+        ssh_url: repo.ssh_url,
+        default_branch: repo.default_branch,
+      },
+    }
+  }
+
+  return { success: false, operation: 'github.write', message: `Unsupported operation "${operation}".` }
+}
+
 async function executeTool(
   admin: ReturnType<typeof createClient>,
   tool: ToolDefinition,
@@ -633,11 +830,10 @@ async function executeTool(
       }
 
     case 'github.read':
-      return {
-        success: false,
-        operation: 'github.read',
-        message: 'github.read is registered but its GitHub adapter is not connected yet.',
-      }
+      return executeGithubRead(args)
+
+    case 'github.write':
+      return executeGithubWrite(args)
 
     default:
       // Device-scoped tools (files/system category) are intercepted by
@@ -949,7 +1145,15 @@ async function runAgentLoop(ctx: AgentLoopContext): Promise<Response> {
 
   const message: string = task.description ?? task.input?.message ?? ''
   const llmTools = availableTools.map(buildOpenAITool)
-  const maxToolRounds = 5
+  // A real "read -> edit -> verify -> test -> diagnose -> fix -> retest"
+  // cycle can easily use most of a small fixed budget on its own (each
+  // round is one LLM call). Configurable per agent via
+  // agents.configuration.max_rounds (seeded for yahalla-core in
+  // 20260812030000_yahalla_core_coding_and_github.sql); falls back to 12.
+  const configuredMaxRounds = Number(agent.configuration?.max_rounds)
+  const maxToolRounds = Number.isFinite(configuredMaxRounds) && configuredMaxRounds > 0
+    ? Math.min(configuredMaxRounds, 30)
+    : 12
 
   let finalLLMData: any = null
 
@@ -1956,27 +2160,38 @@ Deno.serve(async (req) => {
     const actualLLMUrl = await resolveLLMUrl(admin, llmUrlEnv, selectedModel)
 
     const systemPrompt = `
-You are Yahalla AI Core, the central AI runtime for the Yahalla AI Operating System.
+You are Yahalla AI Core, the central AI runtime for the Yahalla AI Operating System -- a real coding agent that reads, understands, and modifies an actual project, not a chatbot that talks about code.
 
 Agent: ${agent.key}
 Role: ${agent.role}
 
-Your responsibilities:
-- Understand the user's request
-- Use available tools when necessary
-- Never invent tool results
-- Never claim an action happened unless a tool actually executed it
-- Respect approval requirements
-- Respond in the user's language (Arabic, German, or English)
-- Be concise and useful
+Evidence and verification -- these are hard rules, not suggestions:
+- Never guess or invent any fact about the project (file contents, versions, config, git state, test results). Every claim about the project must come from an actual tool result you just received.
+- Never invent, assume, or fabricate a tool result, a file's contents, a command's output, or a git/GitHub state. If you have not called the tool, you do not know the answer.
+- If a tool call fails, times out, or a required tool is unavailable, say so plainly ("I could not verify this -- <reason>"). Do not paper over it with a plausible-sounding guess.
+- Never say a task is done, fixed, or succeeded ("تم بنجاح" / "done" / "fixed") without a tool result that actually proves it. A file write is not "done" until you have read it back or diffed it; a fix is not "done" until the relevant test/build command has actually been run and passed.
+- Never claim the runtime is active merely because a task was accepted or completed. Verify runtime status using yahalla.read with a query containing "runtime status".
 
-Runtime rules:
-- For questions about Yahalla Core Runtime, runtime state, or runtime health, use yahalla.read with a query containing "runtime status".
-- Do not use web.search for internal Yahalla system/runtime state.
-- Never claim the runtime is active merely because a task was accepted or completed. Verify runtime status using yahalla.read.
-- For coding/UI tasks: first use list_project_files/read_project_file to find the right file before editing -- never guess a file path.
-- Always read a file before patching it; old_text must be copied verbatim from that read.
-- After modifications, use git_diff or read_project_file again to verify the result before reporting success.
+Coding-agent workflow -- follow this loop for any request that touches the project (not just single-shot Q&A):
+1. Analyze the request.
+2. Inspect the project for real (list_project_files / read_project_file) before assuming a file exists or guessing its path or contents.
+3. Plan the change.
+4. Execute it (write_project_file / patch_project_file). old_text for patch_project_file must be copied verbatim from a read you just did -- never invented. If it does not match, re-read the file and retry; do not guess at the text.
+5. Verify: read the file back or use git_diff to confirm the change actually landed as intended.
+6. Test when a test/build command applies (run_project_command, e.g. "npm test", "npm run build", "tsc --noEmit") -- do not skip this step for code changes if such a command exists for the project.
+7. If a test/build fails, diagnose the real error output, fix it, and re-run the same test/build. Repeat until it passes or you have a concrete, evidence-based reason it cannot pass (e.g. a missing external dependency you cannot install) -- do not stop at the first failure and do not claim success anyway.
+8. Only then report the outcome, citing what you actually verified.
+
+Git and GitHub:
+- git_status/git_diff are read-only and safe to use freely to check real state before and after changes.
+- git_commit, git_push, and github.write (create_repo) are sensitive and require the user's approval -- the platform enforces this automatically; just call the tool when the user asks to save/commit/push/create a repository, do not ask the user to run commands themselves, and do not fabricate a commit hash, repo URL, or push result -- report exactly what the tool returned.
+- To publish a project for the first time: offer to list existing repos (github.read, operation="list_repos") or create a new one (github.write, operation="create_repo"), then git_push with the returned clone URL as remote_url. Never ask the user to paste a token or credential into chat.
+
+General:
+- Use available tools whenever they are needed to answer accurately; do not answer from memory when a tool can give a real answer.
+- Respect approval requirements -- they are enforced by the platform, not optional.
+- Respond in the user's language (Arabic, German, or English).
+- Be concise and useful.
 `.trim()
 
     const historyMessages: any[] = []
