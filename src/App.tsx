@@ -1557,6 +1557,64 @@ function ChatSection() {
     api.getModels().then((m) => setModels(m.filter((x) => x.enabled)))
   }, [])
 
+  // The one-time browser model download used to only start the moment the
+  // user hit send on their first message, blocking that whole first reply
+  // on it. Pulled out so it can run silently in the background as soon as
+  // we know this device will need it (see the effect below) -- by the
+  // time someone finishes typing their first message, the model is
+  // already loaded or well into loading, instead of that cost landing on
+  // the very first send. Safe to call more than once concurrently: the
+  // concurrency-safe loadingPromise in browserLLM.ts makes every caller
+  // (this background warm-up, and sendMessage's own check) join the same
+  // in-flight load rather than starting a new one.
+  // `visible` controls only whether progress/stall UI state gets updated --
+  // the background warm-up call passes false so the very first thing a
+  // visitor sees isn't a download banner they never asked to look at
+  // ("zero-friction"). If the user actually sends a message before that
+  // silent load finishes, sendMessage's own (visible) call to this same
+  // function sees the load already in flight and returns immediately
+  // without re-attaching progress reporting (WebLLM only invokes the
+  // first caller's callback) -- the chat still waits correctly for it via
+  // browserChatCompletion's own await, it just shows the ordinary
+  // "processing" state instead of a percentage in that specific timing
+  // window, rather than nothing at all.
+  async function ensureBrowserModelLoading(visible = true) {
+    if (browserRuntime.browserModelReady()) return
+    if (visible) {
+      setLiveStatus({ state: 'THINKING', summary: 'Downloading local model to this device…' })
+      setModelLoadStalled(false)
+    }
+
+    // A silent progress bar stuck at 0% reads as broken, not slow -- if no
+    // progress event arrives for a while, this is almost always the
+    // browser failing to reach the model host (a slow, restrictive, or
+    // blocking network), not a fast, temporary pause. Say so plainly and
+    // point at the real fix (local-runtime needs no such download at all)
+    // instead of leaving the user staring at "0%" with no explanation.
+    let lastProgressAt = Date.now()
+    const stallCheck = visible
+      ? setInterval(() => {
+          if (Date.now() - lastProgressAt > 15_000) setModelLoadStalled(true)
+        }, 3000)
+      : undefined
+
+    try {
+      await browserRuntime.prepareBrowserModel((p) => {
+        if (!visible) return
+        lastProgressAt = Date.now()
+        setModelLoadStalled(false)
+        setModelLoadProgress(p)
+        setLiveStatus({ state: 'THINKING', summary: p.text || `Downloading local model… ${Math.round(p.progress * 100)}%` })
+      })
+    } finally {
+      if (stallCheck) clearInterval(stallCheck)
+    }
+    if (visible) {
+      setModelLoadProgress(null)
+      setModelLoadStalled(false)
+    }
+  }
+
   // Which tier will actually answer the next message -- shown to the user
   // so "why is this slow / downloading" has an answer before they even
   // send anything, and so local-runtime (the fast, no-download path) gets
@@ -1572,6 +1630,12 @@ function ChatSection() {
       }
       if (await browserRuntime.checkBrowserRuntimeAvailable()) {
         if (!cancelled) setRuntimeTier('browser')
+        // Zero-friction: start the one-time download now, in the
+        // background, rather than waiting for the user to hit send.
+        // Errors here are silently swallowed -- sendMessage's own call
+        // to the same function will surface them normally if the
+        // background attempt didn't already succeed.
+        ensureBrowserModelLoading(false).catch(() => {})
         return
       }
       if (!cancelled) setRuntimeTier('cloud')
@@ -1643,35 +1707,10 @@ function ChatSection() {
         result = await localRuntime.sendChatMessage({ message, conversation_id: conversationId ?? undefined })
       } else if (await browserRuntime.checkBrowserRuntimeAvailable()) {
         setRuntimeTier('browser')
-        if (!browserRuntime.browserModelReady()) {
-          setLiveStatus({ state: 'THINKING', summary: 'Downloading local model to this device…' })
-          setModelLoadStalled(false)
-
-          // A silent progress bar stuck at 0% reads as broken, not slow --
-          // if no progress event arrives for a while, this is almost
-          // always the browser failing to reach the model host (a slow,
-          // restrictive, or blocking network), not a fast, temporary
-          // pause. Say so plainly and point at the real fix (local-runtime
-          // needs no such download at all) instead of leaving the user
-          // staring at "0%" with no explanation.
-          let lastProgressAt = Date.now()
-          const stallCheck = setInterval(() => {
-            if (Date.now() - lastProgressAt > 15_000) setModelLoadStalled(true)
-          }, 3000)
-
-          try {
-            await browserRuntime.prepareBrowserModel((p) => {
-              lastProgressAt = Date.now()
-              setModelLoadStalled(false)
-              setModelLoadProgress(p)
-              setLiveStatus({ state: 'THINKING', summary: p.text || `Downloading local model… ${Math.round(p.progress * 100)}%` })
-            })
-          } finally {
-            clearInterval(stallCheck)
-          }
-          setModelLoadProgress(null)
-          setModelLoadStalled(false)
-        }
+        // Usually already loaded or loading by now -- the background
+        // warm-up effect kicked this off as soon as the page determined
+        // this device would need it, not on this first send.
+        await ensureBrowserModelLoading()
 
         streamingMessageId = crypto.randomUUID()
         const idForClosure = streamingMessageId
