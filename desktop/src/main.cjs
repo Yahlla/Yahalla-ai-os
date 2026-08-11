@@ -11,7 +11,14 @@ const { existsSync, readFileSync } = require('node:fs')
 const { homedir } = require('node:os')
 const { join } = require('node:path')
 
-const RUNTIME_ENTRY = join(__dirname, '..', '..', 'local-runtime', 'dist', 'src', 'index.js')
+// In the monorepo (dev), local-runtime and the frontend build live as
+// sibling directories. In a packaged app there is no monorepo -- everything
+// desktop/scripts/stage-resources.mjs staged into desktop/resources/ ships
+// inside the app under process.resourcesPath instead (see build.extraResources
+// in package.json). Same shape either way, just a different root.
+const RESOURCES_ROOT = app.isPackaged ? process.resourcesPath : join(__dirname, '..', 'resources')
+const RUNTIME_ENTRY = join(RESOURCES_ROOT, 'local-runtime', 'dist', 'src', 'index.js')
+const FRONTEND_INDEX = join(RESOURCES_ROOT, 'app-dist', 'index.html')
 const RUNTIME_CONFIG_PATH = join(homedir(), '.yahalla', 'runtime', 'config.json')
 
 let runtimeProcess = null
@@ -42,7 +49,10 @@ async function waitForRuntime(port, timeoutMs = 30_000) {
 
 function startRuntime() {
   if (!existsSync(RUNTIME_ENTRY)) {
-    console.error(`[desktop] local-runtime is not built. Run "npm run build" in local-runtime/ first. Expected: ${RUNTIME_ENTRY}`)
+    console.error(
+      `[desktop] local-runtime is not staged. In dev, run "node desktop/scripts/stage-resources.mjs" ` +
+        `after building local-runtime/, packages/agent-tools/, and the frontend. Expected: ${RUNTIME_ENTRY}`,
+    )
     return
   }
   const projectRoot = process.env.YAHALLA_PROJECT_ROOT || process.cwd()
@@ -90,7 +100,7 @@ async function createWindow() {
   if (devServerUrl) {
     await mainWindow.loadURL(devServerUrl)
   } else {
-    await mainWindow.loadFile(join(__dirname, '..', '..', 'dist', 'index.html'))
+    await mainWindow.loadFile(FRONTEND_INDEX)
   }
 }
 

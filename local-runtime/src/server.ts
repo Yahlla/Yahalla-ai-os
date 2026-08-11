@@ -4,7 +4,7 @@ import type { RuntimeConfig } from './config.js'
 import type { Db } from './db.js'
 import { EmbodimentStateMachine } from './embodiment/stateMachine.js'
 import { detectHardware } from './hardware.js'
-import { findLlamaServerBinary, isLlmReachable, LocalModelProcess } from './llm.js'
+import { findLlamaServerBinary, isLlamaServerInstalled, isLlmReachable, LocalModelProcess } from './llm.js'
 import { PermissionRequiredError, PerceptionManager } from './perception/manager.js'
 import {
   addKnowledge,
@@ -175,6 +175,13 @@ export function createHttpServer(deps: ServerDeps) {
           running: deps.modelProcess.isRunning(),
           reachable: await isLlmReachable(deps.modelProcess.baseUrl, 1500),
           base_url: deps.modelProcess.baseUrl,
+          // Lets the UI tell "no model downloaded/activated yet" apart
+          // from "llama-server itself was never installed" -- the first
+          // is a normal in-app step, the second needs the user to run
+          // scripts/setup-local.sh (or the desktop app's own install
+          // flow) once, and the two look identical from "reachable: false"
+          // alone.
+          llama_server_installed: isLlamaServerInstalled(),
         })
       }
 

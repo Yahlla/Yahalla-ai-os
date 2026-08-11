@@ -1,0 +1,70 @@
+name: Desktop installer
+
+# Builds the real, one-click Yahalla AI desktop installer (macOS .dmg,
+# Windows .nsis, Linux .AppImage) for a non-technical user to download and
+# run -- no npm, no git, no terminal on their end. This has to happen in
+# CI: Electron's own binary download (and electron-builder's) needs
+# unrestricted network access that a locked-down sandbox doesn't have, so
+# this workflow is the actual place these installers get produced and
+# verified, not a local dev machine.
+#
+# Trigger with a tag push (git tag desktop-v0.1.0 && git push --tags) or
+# manually from the Actions tab.
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Build order matches the dependency chain: agent-tools has no
+      # dependencies, local-runtime depends on agent-tools, the frontend
+      # is independent, and stage-resources.mjs needs all three built
+      # before it can assemble desktop/resources/.
+      - name: Build agent-tools
+        run: npm ci && npm run build
+        working-directory: packages/agent-tools
+
+      - name: Build local-runtime
+        run: npm ci && npm run build && npm test
+        working-directory: local-runtime
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+
+      - name: Install desktop dependencies
+        run: npm ci
+        working-directory: desktop
+
+      - name: Stage resources
+        run: npm run stage
+        working-directory: desktop
+
+      - name: Build installer
+        run: npx electron-builder --publish never
+        working-directory: desktop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yahalla-ai-desktop-${{ matrix.os }}
+          path: |
+            desktop/dist-electron/*.dmg
+            desktop/dist-electron/*.exe
+            desktop/dist-electron/*.AppImage
+          if-no-files-found: warn

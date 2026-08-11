@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 
 export type ChatMessage = { role: string; content: string | null; tool_calls?: unknown; tool_call_id?: string; name?: string }
@@ -80,6 +80,22 @@ export function findLlamaServerBinary(): string {
   // Bare "llama-server" is left for the spawn call itself to resolve via
   // PATH -- existsSync can't check PATH-relative binaries portably.
   return SERVER_BINARY_CANDIDATES[0]!
+}
+
+// Actually verifies a llama-server binary runs, rather than just guessing
+// from fixed paths -- findLlamaServerBinary() falls back to the bare
+// "llama-server" name when nothing at a known path exists, which is not
+// the same as confirming it resolves via PATH. This is what lets the
+// desktop app show "llama-server isn't installed yet" instead of a
+// generic, unexplained "model not reachable" the first time someone opens
+// it without ever having run scripts/setup-local.sh.
+export function isLlamaServerInstalled(binary: string = findLlamaServerBinary()): boolean {
+  try {
+    const result = spawnSync(binary, ['--version'], { stdio: 'ignore', timeout: 5000 })
+    return result.error === undefined && result.status === 0
+  } catch {
+    return false
+  }
 }
 
 export class LocalModelProcess {

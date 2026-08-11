@@ -1,5 +1,7 @@
 node_modules/
 dist/
+desktop/resources/
+desktop/dist-electron/
 .env
 .env.local
 .env.*.local

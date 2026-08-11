@@ -5,11 +5,44 @@
   "description": "Yahalla AI desktop shell: launches the local Agent Runtime as a child process and loads the Control Center against it. No cloud LLM, no tunnel -- this window and the AI it talks to both run on this machine.",
   "main": "src/main.cjs",
   "scripts": {
-    "electron:dev": "electron .",
-    "electron:build": "electron-builder"
+    "stage": "node scripts/stage-resources.mjs",
+    "electron:dev": "npm run stage && electron .",
+    "electron:build": "npm run stage && electron-builder"
   },
   "devDependencies": {
     "electron": "^33.0.0",
     "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "os.yahalla.desktop",
+    "productName": "Yahalla AI",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/local-runtime",
+        "to": "local-runtime"
+      },
+      {
+        "from": "resources/app-dist",
+        "to": "app-dist"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": ["dmg"]
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Utility"
+    }
   }
 }

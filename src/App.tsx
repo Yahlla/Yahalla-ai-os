@@ -1564,7 +1564,8 @@ function ChatSection() {
   useEffect(() => {
     let cancelled = false
     async function detectTier() {
-      if (await localRuntime.checkRuntimeHealth()) {
+      const health = await localRuntime.checkRuntimeHealth()
+      if (health?.llm_reachable) {
         if (!cancelled) setRuntimeTier('local')
         return
       }
@@ -1618,10 +1619,18 @@ function ChatSection() {
       // 3. Only if neither local path is available at all, fall back to
       //    the legacy Supabase-routed path so an existing dev/cloud setup
       //    keeps working rather than breaking outright.
-      const runtimeUp = await localRuntime.checkRuntimeHealth()
+      // A local-runtime process can be up (port reachable) while its LLM
+      // backend isn't -- llama-server not installed yet, or no model
+      // downloaded/activated. Routing to it anyway doesn't hang (the
+      // agent loop's own LLM call times out and returns an error), but it
+      // does mean showing a confusing "local LLM unreachable" failure
+      // instead of quietly using a path that actually works. Gating on
+      // llm_reachable (not just "the process responded at all") is what
+      // makes the three-tier fallback behave the way it's meant to.
+      const runtimeHealth = await localRuntime.checkRuntimeHealth()
       let result: ChatResponse
 
-      if (runtimeUp) {
+      if (runtimeHealth?.llm_reachable) {
         setRuntimeTier('local')
         result = await localRuntime.sendChatMessage({ message, conversation_id: conversationId ?? undefined })
       } else if (await browserRuntime.checkBrowserRuntimeAvailable()) {
