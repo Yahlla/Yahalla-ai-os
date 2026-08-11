@@ -1,0 +1,26 @@
+{
+  "name": "@yahalla/device-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Yahalla AI device-local execution agent: pairs with the Yahalla Control Center and runs project tools (file/git/command) on this machine.",
+  "type": "module",
+  "bin": {
+    "yahalla-agent": "./dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js start",
+    "pair": "node dist/index.js pair",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "~6.0.2"
+  }
+}
