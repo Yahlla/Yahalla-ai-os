@@ -13,6 +13,8 @@ import type {
   Approval,
   AuditLog,
   ChatResponse,
+  Device,
+  PairDeviceResponse,
 } from './types'
 
 const YAHALLA_AI_FUNCTION = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/yahalla-ai`
@@ -207,6 +209,48 @@ export async function approveToolExecution(
   }
 
   return result as ChatResponse
+}
+
+export async function getDevices(): Promise<Device[]> {
+  const { data, error } = await supabase
+    .from('devices')
+    .select('*')
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return (data ?? []) as Device[]
+}
+
+export async function pairDevice(deviceName?: string): Promise<PairDeviceResponse> {
+  const { data: { session } } = await supabase.auth.getSession()
+  if (!session?.access_token) {
+    throw new Error('No active authentication session.')
+  }
+
+  const response = await fetch(YAHALLA_AI_FUNCTION, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${session.access_token}`,
+      apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ device_action: 'pair_device', device_name: deviceName }),
+  })
+
+  const result = await response.json()
+
+  if (!response.ok) {
+    throw new Error(result?.error || `Pairing failed with HTTP ${response.status}`)
+  }
+
+  return result as PairDeviceResponse
+}
+
+export async function revokeDevice(id: string): Promise<void> {
+  const { error } = await supabase
+    .from('devices')
+    .update({ status: 'revoked', revoked_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .eq('id', id)
+  if (error) throw error
 }
 
 export async function updateServer(id: string, updates: Partial<Server>): Promise<void> {

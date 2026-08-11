@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Activity, Bot, Check, ChevronRight, Circle as CircleHelp, Cpu, FileText, FolderKanban, LogOut, Menu, MessageSquare, Monitor, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
+import { Activity, Bot, Check, ChevronRight, Circle as CircleHelp, Copy, Cpu, FileText, FolderKanban, Laptop, LogOut, Menu, MessageSquare, Monitor, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
 import './App.css'
 import { supabase } from './lib/supabase'
 import { signIn, signOut, signUp } from './lib/auth'
@@ -10,6 +10,7 @@ import type {
   Approval,
   AuditLog,
   ChatResponse,
+  Device,
   Model,
   Permission,
   Profile,
@@ -28,6 +29,7 @@ type Page =
   | 'Tools'
   | 'Models'
   | 'Servers'
+  | 'Devices'
   | 'Approvals'
   | 'Permissions'
   | 'Users'
@@ -155,7 +157,7 @@ function StatusBadge({ status }: { status: string }) {
       ? 'badge-success'
       : status === 'running' || status === 'pending' || status === 'queued'
         ? 'badge-running'
-        : status === 'waiting_approval'
+        : status === 'waiting_approval' || status === 'waiting_device'
           ? 'badge-warning'
           : status === 'offline' || status === 'failed' || status === 'rejected' || status === 'disabled'
             ? 'badge-error'
@@ -459,6 +461,166 @@ function ServersSection() {
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+function isDeviceOnline(device: Device): boolean {
+  if (device.status !== 'online' || !device.last_heartbeat_at) return false
+  return Date.now() - new Date(device.last_heartbeat_at).getTime() < 60_000
+}
+
+function DevicesSection() {
+  const [devices, setDevices] = useState<Device[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [pairing, setPairing] = useState<{ code: string; expiresAt: string } | null>(null)
+  const [pairingBusy, setPairingBusy] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [revoking, setRevoking] = useState<string | null>(null)
+
+  function load() {
+    setLoading(true)
+    api.getDevices().then(setDevices).catch((err) => setError(err.message)).finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    load()
+
+    const channel = supabase
+      .channel('devices-section')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'devices' }, () => load())
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [])
+
+  async function connectDevice() {
+    setPairingBusy(true)
+    setError('')
+    setCopied(false)
+    try {
+      const result = await api.pairDevice()
+      if (!result.pairing_code || !result.expires_at) {
+        throw new Error(result.error || 'Failed to create a pairing code.')
+      }
+      setPairing({ code: result.pairing_code, expiresAt: result.expires_at })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create a pairing code.')
+    } finally {
+      setPairingBusy(false)
+    }
+  }
+
+  async function handleRevoke(device: Device) {
+    setRevoking(device.id)
+    try {
+      await api.revokeDevice(device.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to revoke device.')
+    } finally {
+      setRevoking(null)
+    }
+  }
+
+  function copyCode() {
+    if (!pairing) return
+    navigator.clipboard?.writeText(pairing.code)
+    setCopied(true)
+  }
+
+  if (loading) return <div className="loading-text">Loading devices…</div>
+
+  return (
+    <div className="admin-section">
+      <div className="section-header">
+        <h2>Devices</h2>
+        <p>{devices.length} paired · runs project filesystem/git/command tools locally, no VPS</p>
+      </div>
+
+      <div className="data-card-actions" style={{ marginBottom: 20 }}>
+        <button className="mini-button approve" disabled={pairingBusy} onClick={connectDevice}>
+          <Laptop size={14} /> Connect this device
+        </button>
+      </div>
+
+      {error && <p className="data-card-desc" style={{ color: '#fca5a5' }}>{error}</p>}
+
+      {pairing && (
+        <div className="data-card" style={{ marginBottom: 20 }}>
+          <div className="data-card-header">
+            <div className="data-card-icon"><Laptop size={18} /></div>
+            <div className="data-card-title">
+              <div className="data-card-name">Pairing code</div>
+              <div className="data-card-sub">expires {new Date(pairing.expiresAt).toLocaleTimeString()}</div>
+            </div>
+          </div>
+          <div className="pairing-code">
+            {pairing.code}
+            <button className="mini-button" onClick={copyCode} title="Copy">
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+            </button>
+          </div>
+          <p className="data-card-desc">
+            On the machine where the project lives, run once:
+            <br />
+            <code>cd device-agent &amp;&amp; npm run pair {pairing.code}</code>
+            <br />
+            Then <code>npm run build &amp;&amp; sh scripts/install-macos-autostart.sh</code> (macOS) so it starts
+            automatically -- no Terminal after that. See device-agent/README.md.
+          </p>
+        </div>
+      )}
+
+      <div className="card-grid">
+        {devices.map((device) => {
+          const online = isDeviceOnline(device)
+          return (
+            <div key={device.id} className="data-card">
+              <div className="data-card-header">
+                <div className="data-card-icon"><Laptop size={18} /></div>
+                <div className="data-card-title">
+                  <div className="data-card-name">{device.name}</div>
+                  <div className="data-card-sub">{device.platform}</div>
+                </div>
+                <StatusBadge status={device.status === 'revoked' ? 'revoked' : online ? 'online' : 'offline'} />
+              </div>
+              <div className="info-row">
+                <span className="info-label">Heartbeat</span>
+                <span className="info-value">
+                  {device.last_heartbeat_at ? new Date(device.last_heartbeat_at).toLocaleString() : 'Never'}
+                </span>
+              </div>
+              <div className="info-row">
+                <span className="info-label">Paired</span>
+                <span className="info-value">
+                  {device.paired_at ? new Date(device.paired_at).toLocaleString() : '—'}
+                </span>
+              </div>
+              {device.status !== 'revoked' && (
+                <div className="data-card-actions">
+                  <button
+                    className="mini-button reject"
+                    disabled={revoking === device.id}
+                    onClick={() => handleRevoke(device)}
+                  >
+                    <X size={14} /> Revoke
+                  </button>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {devices.length === 0 && (
+        <p className="loading-text">
+          No devices paired yet. Tools that touch your local project (files, git, commands) need a paired
+          device to run on.
+        </p>
+      )}
     </div>
   )
 }
@@ -1244,6 +1406,7 @@ const adminNav: NavItem[] = [
   { label: 'Tools', icon: Wrench, adminOnly: true },
   { label: 'Models', icon: Cpu, adminOnly: true },
   { label: 'Servers', icon: Server, adminOnly: true },
+  { label: 'Devices', icon: Laptop, adminOnly: true },
   { label: 'Approvals', icon: ShieldCheck, adminOnly: true },
   { label: 'Permissions', icon: Shield, adminOnly: true },
   { label: 'Users', icon: Users, adminOnly: true },
@@ -1287,6 +1450,8 @@ function ControlCenter({
         return <ModelsSection />
       case 'Servers':
         return <ServersSection />
+      case 'Devices':
+        return <DevicesSection />
       case 'Approvals':
         return <ApprovalsSection />
       case 'Permissions':

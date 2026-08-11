@@ -45,6 +45,7 @@ export type TaskStatus =
   | 'queued'
   | 'running'
   | 'waiting_approval'
+  | 'waiting_device'
   | 'completed'
   | 'failed'
   | 'cancelled'
@@ -71,6 +72,8 @@ export type Task = {
   project_id: string | null
   conversation_id: string | null
   model_id: string | null
+  assigned_device: string | null
+  checkpoint: Record<string, unknown>
 }
 
 export type ServerType = 'local' | 'lan' | 'remote' | 'cloud'
@@ -89,6 +92,35 @@ export type Server = {
   last_heartbeat: string | null
   created_at: string
   updated_at: string
+}
+
+// A Device is a paired Device Agent process running on the owner's own
+// Mac/Windows/Linux machine -- distinct from a Server (which hosts an LLM
+// model over HTTP). Devices execute project filesystem/git/shell tools.
+export type DevicePlatform = 'macos' | 'windows' | 'linux' | 'other'
+export type DeviceStatus = 'online' | 'offline' | 'revoked'
+
+export type Device = {
+  id: string
+  owner_id: string
+  auth_user_id: string | null
+  name: string
+  platform: DevicePlatform
+  status: DeviceStatus
+  capabilities: Record<string, unknown>
+  project_root: string | null
+  last_heartbeat_at: string | null
+  paired_at: string | null
+  revoked_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type PairDeviceResponse = {
+  success: boolean
+  pairing_code?: string
+  expires_at?: string
+  error?: string
 }
 
 export type ModelType = 'general' | 'coding' | 'reasoning' | 'vision' | 'speech' | 'embedding'
@@ -213,6 +245,8 @@ export type ChatResponse = {
     type: string
   }
   permissions?: string[]
+  device_dispatch?: boolean
+  device_name?: string
   tools?: { key: string; category: string; requires_approval: boolean }[]
   executed_tools?: {
     tool: string
