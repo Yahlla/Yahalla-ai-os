@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Activity, Bot, Check, ChevronRight, Circle as CircleHelp, Code2, Copy, Cpu, Download, FileText, FolderKanban, GitBranch, Laptop, LogOut, Menu, MessageSquare, Monitor, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
+import { Activity, Bot, Check, ChevronRight, Circle as CircleHelp, Code2, Copy, Cpu, Download, FileText, FolderKanban, GitBranch, Laptop, LogOut, Menu, MessageSquare, Mic, MicOff, Monitor, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
 import './App.css'
 import { supabase } from './lib/supabase'
 import { signIn, signOut, signUp } from './lib/auth'
@@ -8,6 +8,8 @@ import * as api from './lib/api'
 import * as localRuntime from './lib/localRuntime'
 import * as browserRuntime from './lib/browserRuntime'
 import * as platformApi from './lib/platformApi'
+import { requestMediaPermission } from './lib/capabilities'
+import { createVoiceRecognizer, isSpeechRecognitionSupported, type VoiceRecognizer } from './lib/voiceInput'
 import type { BrowserChatMessage } from './lib/browserLLM'
 import type {
   Agent,
@@ -1510,6 +1512,9 @@ function ChatSection() {
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
   const [attachmentError, setAttachmentError] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [isListening, setIsListening] = useState(false)
+  const [voiceError, setVoiceError] = useState('')
+  const voiceRecognizerRef = useRef<VoiceRecognizer | null>(null)
   const [sending, setSending] = useState(false)
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
   const [error, setError] = useState('')
@@ -1750,6 +1755,52 @@ function ChatSection() {
 
   function removeAttachment(name: string) {
     setAttachedFiles((prev) => prev.filter((f) => f.name !== name))
+  }
+
+  async function toggleVoiceInput() {
+    if (isListening) {
+      voiceRecognizerRef.current?.stop()
+      return
+    }
+    setVoiceError('')
+    if (!isSpeechRecognitionSupported()) {
+      setVoiceError('التعرف على الصوت غير مدعوم في هذا المتصفح.')
+      return
+    }
+    // Explicit, user-initiated permission request -- matches the pattern
+    // already established in capabilities.ts (requestMediaPermission is
+    // never called automatically). SpeechRecognition would prompt for mic
+    // access on its own too, but asking directly first gives an honest,
+    // specific error message instead of a generic recognition failure if
+    // the user denies it.
+    const granted = await requestMediaPermission('microphone')
+    if (!granted) {
+      setVoiceError('تم رفض إذن الميكروفون.')
+      return
+    }
+
+    const recognizer = createVoiceRecognizer({
+      lang: 'ar-SA',
+      onTranscript: (text, isFinal) => {
+        setInput((prev) => (isFinal ? `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}${text}` : prev))
+      },
+      onEnd: () => {
+        setIsListening(false)
+        voiceRecognizerRef.current = null
+      },
+      onError: (message) => {
+        setVoiceError(message)
+        setIsListening(false)
+        voiceRecognizerRef.current = null
+      },
+    })
+    if (!recognizer) {
+      setVoiceError('تعذّر بدء التعرف على الصوت.')
+      return
+    }
+    voiceRecognizerRef.current = recognizer
+    setIsListening(true)
+    recognizer.start()
   }
 
   async function sendMessage(event?: FormEvent) {
@@ -2189,6 +2240,8 @@ function ChatSection() {
             </div>
           )}
 
+          {voiceError && <div className="composer-error">{voiceError}</div>}
+
           <form className="composer" onSubmit={sendMessage}>
             <input
               ref={fileInputRef}
@@ -2197,8 +2250,16 @@ function ChatSection() {
               hidden
               onChange={(e) => handleFileSelect(e.target.files)}
             />
-            <button type="button" className="composer-icon" onClick={() => fileInputRef.current?.click()} title="Attach a text/code file">
+            <button type="button" className="composer-icon attach" onClick={() => fileInputRef.current?.click()} title="Attach a text/code file">
               <Paperclip size={18} />
+            </button>
+            <button
+              type="button"
+              className={`composer-icon mic ${isListening ? 'listening' : ''}`}
+              onClick={toggleVoiceInput}
+              title={isListening ? 'Stop voice input' : 'Voice input'}
+            >
+              {isListening ? <MicOff size={18} /> : <Mic size={18} />}
             </button>
             <textarea
               ref={textareaRef}
