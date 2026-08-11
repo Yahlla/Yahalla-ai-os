@@ -1,0 +1,22 @@
+# The only exposed port on the whole VPS. Terminates TLS (automatic via
+# Let's Encrypt -- DOMAIN must already point at this server's IP) and
+# reverse-proxies everything to platform-api. Nothing else in the compose
+# stack (postgres, deploy-agent) is reachable from outside this container.
+#
+# Per-IP rate limiting is deliberately not in this file yet -- the stock
+# caddy:2-alpine image has no rate-limit module built in, and adding one
+# (via a custom xcaddy build) is scoped to the load-protection pass, not
+# this one. Until then this is a plain reverse proxy + TLS + gzip.
+
+{$DOMAIN} {
+	encode gzip
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+
+	reverse_proxy platform-api:8080
+}

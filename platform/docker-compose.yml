@@ -1,0 +1,96 @@
+# Self-hosted control plane for Yahalla AI -- coordination, accounts, and
+# the approve-and-ship deployment pipeline only. No AI inference runs here;
+# every user's chat/agent work executes on their own device (browser
+# WebGPU or the Electron/local-runtime app). This is what makes running on
+# a resource-modest VPS viable for any number of users: per-user load here
+# is a handful of small API calls, never a model forward pass.
+#
+# Every service below gets an explicit mem_limit/cpus so a spike in one
+# place degrades gracefully instead of taking the whole box down -- sized
+# for a Strato "Paket M" class VPS (moderate RAM/CPU). Adjust in .env-driven
+# overrides if your box is bigger, but never remove the caps outright.
+#
+# Brought up once by scripts/setup-strato.sh; afterwards the only allowed
+# way to change what's running is deploy-agent picking up an admin-approved
+# deployment_proposals row (see platform/deploy-agent) -- never a terminal.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: yahalla
+      POSTGRES_USER: yahalla
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Read-only access to the repo so setup-strato.sh can run
+      # platform/db/apply.sh *inside* this container against its own
+      # localhost, without needing a postgres client installed on the host.
+      - ..:/workspace:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yahalla -d yahalla"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 512m
+    cpus: 0.75
+
+  platform-api:
+    build: ./api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgresql://yahalla:${POSTGRES_PASSWORD}@postgres:5432/yahalla
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:?SUPABASE_JWT_SECRET must be set in .env}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+    mem_limit: 256m
+    cpus: 0.5
+
+  # The only container allowed to run "git" / "docker compose" against the
+  # live stack (see deploy-agent/src/deploy.ts). Needs the host's Docker
+  # socket (to control the real stack, not a nested one) and a bind-mounted
+  # checkout of this same repo (REPO_HOST_PATH, set by setup-strato.sh) so
+  # a git checkout it performs is the checkout "docker compose up" rebuilds
+  # from.
+  deploy-agent:
+    build: ./deploy-agent
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://yahalla:${POSTGRES_PASSWORD}@postgres:5432/yahalla
+      REPO_DIR: /repo
+      COMPOSE_FILE: platform/docker-compose.yml
+      POLL_INTERVAL_MS: 15000
+    volumes:
+      - ${REPO_HOST_PATH:?REPO_HOST_PATH must be set in .env (the repo checkout's absolute path on the VPS)}:/repo
+      - /var/run/docker.sock:/var/run/docker.sock
+    mem_limit: 128m
+    cpus: 0.25
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN must be set in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - platform-api
+    mem_limit: 128m
+    cpus: 0.25
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:
