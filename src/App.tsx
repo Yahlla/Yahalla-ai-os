@@ -6,6 +6,8 @@ import { supabase } from './lib/supabase'
 import { signIn, signOut, signUp } from './lib/auth'
 import * as api from './lib/api'
 import * as localRuntime from './lib/localRuntime'
+import * as browserRuntime from './lib/browserRuntime'
+import type { BrowserChatMessage } from './lib/browserLLM'
 import type {
   Agent,
   Approval,
@@ -1081,6 +1083,8 @@ function ChatSection() {
   const [showTechnical, setShowTechnical] = useState(false)
   const [lastResult, setLastResult] = useState<ChatResponse | null>(null)
   const [liveStatus, setLiveStatus] = useState<{ state: string; summary: string | null } | null>(null)
+  const [modelLoadProgress, setModelLoadProgress] = useState<{ progress: number; text: string } | null>(null)
+  const browserHistoryRef = useRef<BrowserChatMessage[]>([])
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -1138,20 +1142,42 @@ function ChatSection() {
     setSending(true)
 
     try {
-      // AI inference is local-first: talk to the Agent Runtime on this
-      // device. Only if it isn't reachable at all do we fall back to the
-      // legacy Supabase-routed path, so an existing dev setup (or a
-      // deployment that intentionally still points at a hosted model via
-      // servers/models) keeps working rather than breaking outright.
+      // Three-tier local-first fallback, in order of preference:
+      // 1. A local Agent Runtime process on this device (desktop app /
+      //    dev setup) -- full tool execution, memory, permissions.
+      // 2. No runtime process reachable? Run the model directly in this
+      //    browser tab via WebGPU -- still entirely on-device, works
+      //    identically on a phone or a laptop just by opening the page,
+      //    no install, no terminal. No file/tool access in this mode
+      //    (a browser tab structurally cannot have that).
+      // 3. Only if neither local path is available at all, fall back to
+      //    the legacy Supabase-routed path so an existing dev/cloud setup
+      //    keeps working rather than breaking outright.
       const runtimeUp = await localRuntime.checkRuntimeHealth()
-      const result = runtimeUp
-        ? await localRuntime.sendChatMessage({ message, conversation_id: conversationId ?? undefined })
-        : await api.sendChatMessage({
-            message,
-            conversation_id: conversationId ?? undefined,
-            agent_key: selectedAgent,
-            model_id: selectedModel || undefined,
+      let result: ChatResponse
+
+      if (runtimeUp) {
+        result = await localRuntime.sendChatMessage({ message, conversation_id: conversationId ?? undefined })
+      } else if (await browserRuntime.checkBrowserRuntimeAvailable()) {
+        if (!browserRuntime.browserModelReady()) {
+          setLiveStatus({ state: 'THINKING', summary: 'Downloading local model to this device…' })
+          await browserRuntime.prepareBrowserModel((p) => {
+            setModelLoadProgress(p)
+            setLiveStatus({ state: 'THINKING', summary: p.text || `Downloading local model… ${Math.round(p.progress * 100)}%` })
           })
+          setModelLoadProgress(null)
+        }
+        const browserResult = await browserRuntime.sendChatMessage(browserHistoryRef.current, message)
+        browserHistoryRef.current = browserResult.updatedHistory
+        result = browserResult
+      } else {
+        result = await api.sendChatMessage({
+          message,
+          conversation_id: conversationId ?? undefined,
+          agent_key: selectedAgent,
+          model_id: selectedModel || undefined,
+        })
+      }
 
       setLastResult(result)
 
@@ -1191,6 +1217,7 @@ function ChatSection() {
       ])
     } finally {
       setSending(false)
+      setModelLoadProgress(null)
       setTimeout(() => textareaRef.current?.focus(), 50)
     }
   }
@@ -1371,6 +1398,13 @@ function ChatSection() {
 
         <div className="composer-area">
           {error && <div className="composer-error">{error}</div>}
+
+          {modelLoadProgress && (
+            <div className="composer-error" style={{ background: 'rgba(99,102,241,0.12)', color: 'inherit' }}>
+              جارٍ تحميل النموذج المحلي على هذا الجهاز (مرة واحدة فقط)… {Math.round(modelLoadProgress.progress * 100)}%
+              {modelLoadProgress.text ? ` — ${modelLoadProgress.text}` : ''}
+            </div>
+          )}
 
           {showTechnical && lastResult && (
             <details open className="technical-panel">
