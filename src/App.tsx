@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Activity, Bot, Check, ChevronRight, Circle as CircleHelp, Copy, Cpu, FileText, FolderKanban, GitBranch, Laptop, LogOut, Menu, MessageSquare, Monitor, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
+import { Activity, Bot, Check, ChevronRight, Circle as CircleHelp, Code2, Copy, Cpu, Download, FileText, FolderKanban, GitBranch, Laptop, LogOut, Menu, MessageSquare, Monitor, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
 import './App.css'
 import { supabase } from './lib/supabase'
 import { signIn, signOut, signUp } from './lib/auth'
@@ -1303,6 +1303,182 @@ type ChatMessage = {
   error?: boolean
 }
 
+// =============================================================
+// Artifacts (side panel for HTML/code/documents/charts, separate from
+// the chat transcript -- matching Claude's own Artifacts UX)
+// =============================================================
+
+type Artifact = {
+  id: string
+  title: string
+  language: string
+  kind: 'html' | 'svg' | 'markdown' | 'code'
+  content: string
+}
+
+function detectArtifactKind(language: string): Artifact['kind'] {
+  const lang = language.toLowerCase()
+  if (lang === 'html' || lang === 'htm') return 'html'
+  if (lang === 'svg') return 'svg'
+  if (lang === 'markdown' || lang === 'md') return 'markdown'
+  return 'code'
+}
+
+const ARTIFACT_EXTENSIONS: Record<string, string> = {
+  html: 'html', htm: 'html', svg: 'svg', markdown: 'md', md: 'md',
+  javascript: 'js', typescript: 'ts', jsx: 'jsx', tsx: 'tsx', python: 'py',
+  json: 'json', css: 'css', sh: 'sh', bash: 'sh', sql: 'sql', yaml: 'yaml', yml: 'yaml',
+}
+
+function artifactTitle(language: string, index: number): string {
+  const lang = language.toLowerCase()
+  const suffix = ARTIFACT_EXTENSIONS[lang] || lang || 'txt'
+  return `artifact-${index + 1}.${suffix}`
+}
+
+// Fenced code blocks earn their own side-panel view instead of crowding
+// the chat transcript -- the same heuristic Claude's own Artifacts feature
+// uses: substantial or inherently visual content (HTML/SVG/documents) goes
+// to the panel, trivial one-line snippets stay inline in the bubble.
+function extractArtifacts(messageId: string, content: string): Artifact[] {
+  const artifacts: Artifact[] = []
+  const regex = /```(\w+)?\n([\s\S]*?)```/g
+  let match: RegExpExecArray | null
+  let index = 0
+  while ((match = regex.exec(content))) {
+    const language = match[1] || 'text'
+    const body = (match[2] ?? '').trim()
+    if (!body) continue
+    const kind = detectArtifactKind(language)
+    if (kind === 'code' && body.split('\n').length < 4) continue
+    artifacts.push({ id: `${messageId}-${index}`, title: artifactTitle(language, index), language, kind, content: body })
+    index++
+  }
+  return artifacts
+}
+
+// Tiny, dependency-free Markdown renderer -- headings, bold/italic/code
+// spans, and unordered lists. Enough to render a generated document
+// legibly in the panel without pulling in a Markdown library.
+function renderMarkdownLite(text: string) {
+  const inline = (s: string, keyBase: string) => {
+    const parts: React.ReactNode[] = []
+    const tokenRegex = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g
+    let last = 0
+    let m: RegExpExecArray | null
+    let key = 0
+    while ((m = tokenRegex.exec(s))) {
+      if (m.index > last) parts.push(s.slice(last, m.index))
+      const token = m[0]
+      if (token.startsWith('**')) parts.push(<strong key={`${keyBase}-${key++}`}>{token.slice(2, -2)}</strong>)
+      else if (token.startsWith('`')) parts.push(<code key={`${keyBase}-${key++}`}>{token.slice(1, -1)}</code>)
+      else parts.push(<em key={`${keyBase}-${key++}`}>{token.slice(1, -1)}</em>)
+      last = tokenRegex.lastIndex
+    }
+    if (last < s.length) parts.push(s.slice(last))
+    return parts
+  }
+
+  const blocks: React.ReactNode[] = []
+  let listItems: string[] = []
+  const flushList = () => {
+    if (listItems.length) {
+      blocks.push(<ul key={blocks.length}>{listItems.map((li, i) => <li key={i}>{inline(li, `${blocks.length}-${i}`)}</li>)}</ul>)
+      listItems = []
+    }
+  }
+
+  for (const line of text.split('\n')) {
+    const heading = line.match(/^(#{1,3})\s+(.*)/)
+    if (heading) {
+      flushList()
+      const level = heading[1]!.length
+      const rendered = inline(heading[2]!, `h${blocks.length}`)
+      blocks.push(level === 1 ? <h1 key={blocks.length}>{rendered}</h1> : level === 2 ? <h2 key={blocks.length}>{rendered}</h2> : <h3 key={blocks.length}>{rendered}</h3>)
+      continue
+    }
+    const listItem = line.match(/^[-*]\s+(.*)/)
+    if (listItem) {
+      listItems.push(listItem[1]!)
+      continue
+    }
+    flushList()
+    if (line.trim() === '') continue
+    blocks.push(<p key={blocks.length}>{inline(line, `p${blocks.length}`)}</p>)
+  }
+  flushList()
+  return blocks
+}
+
+function downloadArtifact(artifact: Artifact): void {
+  const blob = new Blob([artifact.content], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = artifact.title
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+function ArtifactsPanel({ artifact, onClose }: { artifact: Artifact; onClose: () => void }) {
+  const canPreview = artifact.kind === 'html' || artifact.kind === 'svg'
+  const [view, setView] = useState<'preview' | 'source'>(canPreview ? 'preview' : 'source')
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    setView(canPreview ? 'preview' : 'source')
+    setCopied(false)
+  }, [artifact.id, canPreview])
+
+  function copy() {
+    navigator.clipboard?.writeText(artifact.content)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+
+  const previewDoc =
+    artifact.kind === 'html'
+      ? artifact.content
+      : `<!doctype html><html><body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#fff">${artifact.content}</body></html>`
+
+  return (
+    <div className="artifacts-panel">
+      <div className="artifacts-panel-header">
+        <div className="artifacts-panel-title">
+          <Code2 size={15} />
+          <span>{artifact.title}</span>
+        </div>
+        <div className="artifacts-panel-actions">
+          {canPreview && (
+            <div className="artifacts-view-toggle">
+              <button className={view === 'preview' ? 'active' : ''} onClick={() => setView('preview')}>Preview</button>
+              <button className={view === 'source' ? 'active' : ''} onClick={() => setView('source')}>Code</button>
+            </div>
+          )}
+          <button className="icon-button" onClick={copy} title="Copy">
+            {copied ? <Check size={15} /> : <Copy size={15} />}
+          </button>
+          <button className="icon-button" onClick={() => downloadArtifact(artifact)} title="Download">
+            <Download size={15} />
+          </button>
+          <button className="icon-button" onClick={onClose} title="Close">
+            <X size={15} />
+          </button>
+        </div>
+      </div>
+      <div className="artifacts-panel-body">
+        {canPreview && view === 'preview' ? (
+          <iframe className="artifact-frame" sandbox="allow-scripts" srcDoc={previewDoc} title={artifact.title} />
+        ) : artifact.kind === 'markdown' ? (
+          <div className="artifact-markdown">{renderMarkdownLite(artifact.content)}</div>
+        ) : (
+          <pre className="artifact-code"><code>{artifact.content}</code></pre>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function ChatSection() {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -1326,10 +1502,31 @@ function ChatSection() {
   const [lastResult, setLastResult] = useState<ChatResponse | null>(null)
   const [liveStatus, setLiveStatus] = useState<{ state: string; summary: string | null } | null>(null)
   const [modelLoadProgress, setModelLoadProgress] = useState<{ progress: number; text: string } | null>(null)
+  const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null)
   const browserHistoryRef = useRef<BrowserChatMessage[]>([])
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // Fenced code blocks in assistant messages become artifacts, rendered in
+  // the side panel instead of inline -- recomputed only when the
+  // transcript actually changes, not on every keystroke/render.
+  const messageArtifacts = useMemo(() => {
+    const map = new Map<string, Artifact[]>()
+    for (const message of messages) {
+      if (message.role === 'assistant') map.set(message.id, extractArtifacts(message.id, message.content))
+    }
+    return map
+  }, [messages])
+
+  const activeArtifact = useMemo(() => {
+    if (!activeArtifactId) return null
+    for (const artifacts of messageArtifacts.values()) {
+      const found = artifacts.find((a) => a.id === activeArtifactId)
+      if (found) return found
+    }
+    return null
+  }, [activeArtifactId, messageArtifacts])
 
   useEffect(() => {
     // Live "what is Yahalla doing right now" indicator -- concise
@@ -1444,6 +1641,8 @@ function ChatSection() {
       }
 
       setMessages((prev) => [...prev, assistantMessage])
+      const newArtifacts = extractArtifacts(assistantMessage.id, assistantMessage.content)
+      if (newArtifacts.length > 0) setActiveArtifactId(newArtifacts[newArtifacts.length - 1]!.id)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unknown error'
       setError(msg)
@@ -1478,6 +1677,7 @@ function ChatSection() {
     setLastResult(null)
     setError('')
     setInput('')
+    setActiveArtifactId(null)
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -1541,6 +1741,7 @@ function ChatSection() {
       </div>
 
       <div className="chat-body">
+      <div className="chat-main">
         <div className="conversation">
           <div className="conversation-intro">
             <div className="intro-orb">
@@ -1611,6 +1812,16 @@ function ChatSection() {
                       ))}
                     </div>
                   )}
+                  {(messageArtifacts.get(message.id) ?? []).map((artifact) => (
+                    <button
+                      key={artifact.id}
+                      className={`artifact-chip ${activeArtifactId === artifact.id ? 'active' : ''}`}
+                      onClick={() => setActiveArtifactId(artifact.id)}
+                    >
+                      <Code2 size={12} />
+                      {artifact.title}
+                    </button>
+                  ))}
                 </div>
               </div>
             ))}
@@ -1690,6 +1901,8 @@ function ChatSection() {
             Yahalla AI may make mistakes. Review important actions before execution.
           </div>
         </div>
+      </div>
+      {activeArtifact && <ArtifactsPanel artifact={activeArtifact} onClose={() => setActiveArtifactId(null)} />}
       </div>
     </div>
   )

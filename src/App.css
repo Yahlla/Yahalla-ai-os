@@ -923,6 +923,7 @@ button {
    ============================================================= */
 
 .chat-page {
+  position: relative;
   min-height: 0;
   flex: 1;
   display: flex;
@@ -1039,8 +1040,177 @@ button {
   min-height: 0;
   flex: 1;
   display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+.chat-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* =============================================================
+   Artifacts side panel
+   ============================================================= */
+
+.artifacts-panel {
+  width: 45%;
+  min-width: 340px;
+  max-width: 640px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid rgba(255,255,255,.07);
+  background: #05060a;
+  animation: artifact-slide-in .22s ease;
+}
+
+@keyframes artifact-slide-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.artifacts-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255,255,255,.07);
+  flex-shrink: 0;
+}
+
+.artifacts-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255,255,255,.85);
+}
+
+.artifacts-panel-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifacts-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.artifacts-view-toggle {
+  display: flex;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-right: 4px;
+}
+
+.artifacts-view-toggle button {
+  padding: 5px 10px;
+  font-size: 10px;
+  color: rgba(255,255,255,.5);
+  background: transparent;
+  border: none;
+}
+
+.artifacts-view-toggle button.active {
+  color: #fff;
+  background: rgba(255,255,255,.1);
+}
+
+.artifacts-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.artifact-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+
+.artifact-code {
+  margin: 0;
+  padding: 16px;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: rgba(255,255,255,.85);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.artifact-markdown {
+  padding: 20px 24px;
+  color: rgba(255,255,255,.8);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.artifact-markdown h1, .artifact-markdown h2, .artifact-markdown h3 {
+  color: #fff;
+  margin: 1.2em 0 .5em;
+}
+
+.artifact-markdown h1:first-child, .artifact-markdown h2:first-child, .artifact-markdown h3:first-child {
+  margin-top: 0;
+}
+
+.artifact-markdown code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255,255,255,.08);
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.artifact-markdown ul {
+  padding-left: 1.4em;
+}
+
+.artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  margin-right: 6px;
+  padding: 6px 12px;
+  border: 1px solid rgba(155,146,255,.2);
+  border-radius: 8px;
+  color: #d9d5ff;
+  background: rgba(112,99,255,.08);
+  font-size: 11px;
+  transition: .18s ease;
+}
+
+.artifact-chip:hover {
+  background: rgba(112,99,255,.16);
+}
+
+.artifact-chip.active {
+  border-color: rgba(155,146,255,.5);
+  background: rgba(112,99,255,.22);
+}
+
+@media (max-width: 900px) {
+  .artifacts-panel {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    max-width: none;
+    z-index: 20;
+  }
 }
 
 .conversation {
