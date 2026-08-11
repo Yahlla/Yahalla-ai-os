@@ -3,6 +3,23 @@
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", sans-serif;
+
+  /* Premium dark theme tokens -- one signature accent gradient (violet ->
+     cyan) reused everywhere something should read as "the brand", plus a
+     shared glass-elevation recipe so every raised surface (sidebar,
+     header, cards, login) has the same tactile depth instead of flat
+     rgba fills. */
+  --accent-1: #7c6cff;
+  --accent-2: #5ee0ff;
+  --accent-gradient: linear-gradient(135deg, var(--accent-1), var(--accent-2));
+  --accent-glow: 0 0 40px rgba(124,108,255,.22);
+
+  --surface-glass: rgba(255,255,255,.035);
+  --surface-glass-hover: rgba(255,255,255,.06);
+  --surface-border: rgba(255,255,255,.08);
+  --surface-shadow: 0 1px 0 rgba(255,255,255,.05) inset, 0 12px 32px -16px rgba(0,0,0,.55);
+
+  --ease-premium: cubic-bezier(.2,.8,.2,1);
 }
 
 * {
@@ -21,6 +38,16 @@ button, input, textarea, select {
 
 button {
   cursor: pointer;
+}
+
+::selection {
+  background: rgba(124,108,255,.35);
+  color: #fff;
+}
+
+:focus-visible {
+  outline: 2px solid rgba(124,108,255,.5);
+  outline-offset: 2px;
 }
 
 /* =============================================================
@@ -47,6 +74,8 @@ button {
   padding: 18px 14px;
   border-right: 1px solid rgba(255,255,255,.07);
   background: linear-gradient(180deg, rgba(18,21,28,.98), rgba(10,12,17,.98));
+  backdrop-filter: blur(20px);
+  box-shadow: var(--surface-shadow);
 }
 
 .sidebar-brand {
@@ -62,9 +91,9 @@ button {
   display: grid;
   place-items: center;
   border-radius: 12px;
-  color: #fff;
-  background: linear-gradient(135deg, #ffffff, #aeb4ff);
-  box-shadow: 0 0 28px rgba(145,143,255,.24);
+  color: #0a0c12;
+  background: var(--accent-gradient);
+  box-shadow: var(--accent-glow);
 }
 
 .brand-title {
@@ -91,12 +120,13 @@ button {
   border-radius: 12px;
   color: #fff;
   background: rgba(255,255,255,.055);
-  transition: .2s ease;
+  transition: .2s var(--ease-premium);
 }
 
 .new-chat-button:hover {
   background: rgba(255,255,255,.1);
-  border-color: rgba(255,255,255,.16);
+  border-color: rgba(124,108,255,.3);
+  box-shadow: var(--accent-glow);
   transform: translateY(-1px);
 }
 
@@ -137,8 +167,8 @@ button {
 .nav-item.active {
   color: #fff;
   border-color: rgba(255,255,255,.08);
-  background: linear-gradient(90deg, rgba(255,255,255,.095), rgba(255,255,255,.035));
-  box-shadow: inset 2px 0 0 rgba(255,255,255,.7);
+  background: linear-gradient(90deg, rgba(124,108,255,.14), rgba(255,255,255,.03));
+  box-shadow: inset 2px 0 0 var(--accent-2);
 }
 
 .nav-arrow {
@@ -460,13 +490,15 @@ button {
   padding: 16px;
   border: 1px solid rgba(255,255,255,.07);
   border-radius: 14px;
-  background: rgba(255,255,255,.025);
-  transition: .2s ease;
+  background: var(--surface-glass);
+  box-shadow: var(--surface-shadow);
+  transition: .22s var(--ease-premium);
 }
 
 .data-card:hover {
-  border-color: rgba(255,255,255,.12);
-  background: rgba(255,255,255,.04);
+  border-color: rgba(124,108,255,.22);
+  background: var(--surface-glass-hover);
+  transform: translateY(-1px);
 }
 
 .data-card-header {
@@ -937,6 +969,8 @@ button {
   justify-content: space-between;
   padding: 0 28px;
   border-bottom: 1px solid rgba(255,255,255,.045);
+  background: rgba(10,12,17,.5);
+  backdrop-filter: blur(20px);
   flex-wrap: wrap;
   gap: 10px;
 }
@@ -1483,8 +1517,8 @@ button {
 }
 
 .composer:focus-within {
-  border-color: rgba(158,150,255,.27);
-  box-shadow: 0 20px 60px rgba(0,0,0,.4), 0 0 0 3px rgba(113,100,255,.045);
+  border-color: rgba(124,108,255,.35);
+  box-shadow: 0 20px 60px rgba(0,0,0,.4), 0 0 0 3px rgba(124,108,255,.08);
 }
 
 .composer textarea {
@@ -1534,14 +1568,14 @@ button {
   place-items: center;
   border: 0;
   border-radius: 10px;
-  color: #08090d;
-  background: #fff;
-  transition: .2s ease;
+  color: #0a0c12;
+  background: var(--accent-gradient);
+  transition: .2s var(--ease-premium);
 }
 
 .send-button:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 5px 20px rgba(255,255,255,.14);
+  box-shadow: var(--accent-glow);
 }
 
 .send-button:disabled {
@@ -1600,15 +1634,15 @@ button {
 .primary-button {
   min-height: 42px;
   padding: 0 16px;
-  color: #090a0e;
-  background: #fff;
-  border-color: #fff;
+  color: #0a0c12;
+  background: var(--accent-gradient);
+  border-color: transparent;
   font-size: 11px;
   font-weight: 650;
 }
 
 .primary-button:hover {
-  background: #e8e8ed;
+  box-shadow: var(--accent-glow);
   transform: translateY(-1px);
 }
 
@@ -1671,13 +1705,13 @@ button {
 .glow-one {
   top: -250px;
   left: -100px;
-  background: #635bff;
+  background: var(--accent-1);
 }
 
 .glow-two {
   right: -180px;
   bottom: -250px;
-  background: #00c9ff;
+  background: var(--accent-2);
 }
 
 .login-card {
