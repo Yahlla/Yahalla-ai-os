@@ -3,19 +3,33 @@ import { gitDiff, gitStatus } from './git.js'
 import { runProjectCommand } from './run_command.js'
 import { PathEscapeError } from './sandbox.js'
 
-export type DeviceToolExecutor = (projectRoot: string, args: Record<string, unknown>) => ToolResult
+export type DeviceToolExecutor = (
+  projectRoot: string,
+  args: Record<string, unknown>,
+  toolConfiguration: Record<string, unknown>,
+) => ToolResult
 
 const REGISTRY: Record<string, DeviceToolExecutor> = {
-  read_project_file: readProjectFile,
-  list_project_files: listProjectFiles,
-  write_project_file: writeProjectFile,
-  patch_project_file: patchProjectFile,
+  read_project_file: (root, args) => readProjectFile(root, args),
+  list_project_files: (root, args) => listProjectFiles(root, args),
+  write_project_file: (root, args) => writeProjectFile(root, args),
+  patch_project_file: (root, args) => patchProjectFile(root, args),
   git_status: (root) => gitStatus(root),
   git_diff: (root, args) => gitDiff(root, args),
-  run_project_command: runProjectCommand,
+  run_project_command: (root, args, config) => {
+    const allowlist = Array.isArray(config?.allowlist)
+      ? config.allowlist.map(String)
+      : undefined
+    return allowlist ? runProjectCommand(root, args, allowlist) : runProjectCommand(root, args)
+  },
 }
 
-export function executeDeviceTool(toolKey: string, projectRoot: string, args: Record<string, unknown>): ToolResult {
+export function executeDeviceTool(
+  toolKey: string,
+  projectRoot: string,
+  args: Record<string, unknown>,
+  toolConfiguration: Record<string, unknown> = {},
+): ToolResult {
   const executor = REGISTRY[toolKey]
 
   if (!executor) {
@@ -23,7 +37,7 @@ export function executeDeviceTool(toolKey: string, projectRoot: string, args: Re
   }
 
   try {
-    return executor(projectRoot, args)
+    return executor(projectRoot, args, toolConfiguration)
   } catch (error) {
     if (error instanceof PathEscapeError) {
       return { success: false, error: error.message }

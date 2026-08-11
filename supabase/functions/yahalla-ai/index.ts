@@ -1,10 +1,35 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers':
-    'Content-Type, Authorization, X-Client-Info, Apikey',
+function buildCorsHeaders(origin: string | null) {
+  const allowedOrigins = (
+    Deno.env.get('YAHALLA_ALLOWED_ORIGINS') ??
+    'https://yahalla-ai.yahalla.de'
+  )
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+
+  const allowOrigin =
+    origin && allowedOrigins.includes(origin) ? origin : allowedOrigins[0]
+
+  return {
+    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers':
+      'Content-Type, Authorization, X-Client-Info, Apikey',
+    Vary: 'Origin',
+  }
+}
+
+function jsonWithHeaders(
+  data: unknown,
+  status: number,
+  headers: Record<string, string>,
+) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...headers, 'Content-Type': 'application/json' },
+  })
 }
 
 type RequestBody = {
@@ -16,6 +41,16 @@ type RequestBody = {
   approval_action?: 'approve' | 'reject'
   tool_execution_id?: string
   decision_note?: string
+  device_action?:
+    | 'pair_device'
+    | 'device_exchange'
+    | 'device_heartbeat'
+    | 'resume_task'
+  device_name?: string
+  device_platform?: string
+  device_capabilities?: Record<string, unknown>
+  pairing_code?: string
+  task_id?: string
 }
 
 type ToolDefinition = {
@@ -64,14 +99,15 @@ type AgentRow = {
   server_id: string | null
 }
 
-function json(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      ...corsHeaders,
-      'Content-Type': 'application/json',
-    },
-  })
+// Tools in these categories touch the local filesystem/shell and can only
+// run where a real project checkout exists -- i.e. on a paired Device
+// Agent, never inside the stateless edge function. "servers"/"models"
+// register LLM inference backends; "devices" are a different concept, see
+// supabase/migrations/20260812010000_device_execution_unified.sql.
+const DEVICE_TOOL_CATEGORIES = ['files', 'system']
+
+function isDeviceScopedTool(tool: ToolDefinition): boolean {
+  return DEVICE_TOOL_CATEGORIES.includes(tool.category)
 }
 
 function extractMessage(data: any): any {
@@ -133,17 +169,19 @@ function toolDescription(key: string): string {
     case 'yahalla.read':
       return 'Read authorized Yahalla data (tasks, agents, tools, memory, runtime). Read-only.'
     case 'read_project_file':
-      return 'Read a file from the project workspace. Read-only.'
+      return 'Read a file from the project workspace, on the device where the project is checked out. Read-only.'
+    case 'list_project_files':
+      return 'List files and directories under a path in the project workspace (use "." for the whole project). Read-only.'
     case 'write_project_file':
-      return 'Write or overwrite a file in the project workspace. Requires approval.'
+      return 'Create or overwrite a file in the project workspace. Requires approval.'
     case 'patch_project_file':
-      return 'Apply a targeted patch to an existing file. Requires approval.'
+      return 'Replace an exact, unique block of text in an existing file. old_text must be copied verbatim from a prior read_project_file result -- never invented. If it does not match, re-read the file and retry. Requires approval.'
     case 'git_status':
-      return 'Show the working tree status. Read-only.'
+      return 'Show the working tree status of the project git repository. Read-only.'
     case 'git_diff':
-      return 'Show unstaged or staged changes. Read-only.'
+      return 'Show unstaged or staged changes in the project git repository, optionally scoped to one path. Read-only.'
     case 'run_project_command':
-      return 'Run a safe shell command (build, lint, test, typecheck). Requires approval.'
+      return 'Run an allowlisted command (see the tool configuration) in the project directory. Requires approval.'
     case 'web.search':
       return 'Search publicly available web information.'
     case 'github.read':
@@ -159,23 +197,105 @@ function toolDescription(key: string): string {
   }
 }
 
+// Each tool needs the LLM to send the right argument shape -- a single
+// generic "query" string does not work for the file/git/command tools,
+// which need structured arguments matching what the Device Agent's tool
+// executors actually expect (device-agent/src/tools/*.ts).
+function toolParameterSchema(key: string): Record<string, unknown> {
+  switch (key) {
+    case 'read_project_file':
+      return {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the project root.' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      }
+
+    case 'list_project_files':
+      return {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description: 'Directory path relative to the project root. Use "." for the project root.',
+          },
+        },
+        additionalProperties: false,
+      }
+
+    case 'write_project_file':
+      return {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the project root.' },
+          content: { type: 'string', description: 'Full new content of the file.' },
+        },
+        required: ['path', 'content'],
+        additionalProperties: false,
+      }
+
+    case 'patch_project_file':
+      return {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'File path relative to the project root.' },
+          old_text: {
+            type: 'string',
+            description: 'Exact, unique text to replace, copied verbatim from the most recent read_project_file result.',
+          },
+          new_text: { type: 'string', description: 'Replacement text.' },
+        },
+        required: ['path', 'old_text', 'new_text'],
+        additionalProperties: false,
+      }
+
+    case 'git_status':
+      return { type: 'object', properties: {}, additionalProperties: false }
+
+    case 'git_diff':
+      return {
+        type: 'object',
+        properties: {
+          staged: { type: 'boolean', description: 'Show staged (--cached) diff instead of the working tree diff.' },
+          path: { type: 'string', description: 'Optional: scope the diff to one file path.' },
+        },
+        additionalProperties: false,
+      }
+
+    case 'run_project_command':
+      return {
+        type: 'object',
+        properties: {
+          command: {
+            type: 'string',
+            description: 'One of the exact allowlisted command strings from this tool\'s configuration (e.g. "npm run build").',
+          },
+        },
+        required: ['command'],
+        additionalProperties: false,
+      }
+
+    default:
+      return {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The requested query or operation.' },
+        },
+        required: ['query'],
+        additionalProperties: true,
+      }
+  }
+}
+
 function buildOpenAITool(tool: ToolDefinition) {
   return {
     type: 'function',
     function: {
       name: tool.key,
       description: toolDescription(tool.key),
-      parameters: {
-        type: 'object',
-        properties: {
-          query: {
-            type: 'string',
-            description: 'The requested query or operation.',
-          },
-        },
-        required: ['query'],
-        additionalProperties: true,
-      },
+      parameters: toolParameterSchema(tool.key),
     },
   }
 }
@@ -246,36 +366,87 @@ function buildLLMUrl(model: ModelRow, serverHostname: string, serverPort: number
   return `http://${serverHostname}:${serverPort}${endpoint}`
 }
 
+async function resolveLLMUrl(
+  admin: ReturnType<typeof createClient>,
+  envLLMUrl: string | undefined,
+  selectedModel: ModelRow,
+): Promise<string> {
+  if (envLLMUrl) return envLLMUrl
+
+  let serverHostname = '127.0.0.1'
+  let serverPort = 8080
+
+  if (selectedModel.server_id) {
+    const { data: server } = await admin
+      .from('servers')
+      .select('hostname, port')
+      .eq('id', selectedModel.server_id)
+      .maybeSingle()
+    if (server) {
+      serverHostname = server.hostname
+      serverPort = server.port
+    }
+  }
+
+  return buildLLMUrl(selectedModel, serverHostname, serverPort)
+}
+
+type LLMCallResult =
+  | { ok: true; response: Response; data: any; rawText: string }
+  | { ok: false; errorMessage: string }
+
 async function callLLM(
   llmUrl: string,
   payload: Record<string, unknown>,
-) {
-  const response = await fetch(llmUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(payload),
-  })
+  apiKey: string | undefined,
+  timeoutMs: number,
+): Promise<LLMCallResult> {
+  const controller = new AbortController()
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs)
 
-  const rawText = await response.text()
-
-  console.log('YAHALLA_LLM_DEBUG', JSON.stringify({
-    ok: response.ok,
-    status: response.status,
-    statusText: response.statusText,
-    responseBody: rawText.slice(0, 2000),
-  }))
-
-  let data: any
   try {
-    data = JSON.parse(rawText)
-  } catch {
-    data = rawText
-  }
+    const response = await fetch(llmUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    })
 
-  return { response, data, rawText }
+    const rawText = await response.text()
+
+    console.log('YAHALLA_LLM_DEBUG', JSON.stringify({
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      responseBody: rawText.slice(0, 2000),
+    }))
+
+    let data: any
+    try {
+      data = JSON.parse(rawText)
+    } catch {
+      data = rawText
+    }
+
+    return { ok: true, response, data, rawText }
+  } catch (error) {
+    const isAbort = error instanceof DOMException && error.name === 'AbortError'
+    const errorMessage = isAbort
+      ? `LLM request timed out after ${timeoutMs}ms.`
+      : error instanceof Error
+        ? error.message
+        : 'LLM request failed.'
+
+    console.error('YAHALLA_LLM_ERROR', errorMessage)
+
+    return { ok: false, errorMessage }
+  } finally {
+    clearTimeout(timeoutHandle)
+  }
 }
 
 // =============================================================
@@ -287,8 +458,7 @@ async function executeYahallaRead(
   args: Record<string, unknown>,
   userId: string,
 ) {
-  const query =
-    typeof args.query === 'string' ? args.query.toLowerCase() : ''
+  const query = typeof args.query === 'string' ? args.query.toLowerCase() : ''
 
   if (
     query.includes('open task') ||
@@ -300,7 +470,7 @@ async function executeYahallaRead(
       .from('tasks')
       .select('id,title,description,status,priority,created_at,updated_at,current_step,progress')
       .eq('requested_by', userId)
-      .in('status', ['pending', 'queued', 'running', 'waiting_approval'])
+      .in('status', ['pending', 'queued', 'running', 'waiting_approval', 'waiting_device'])
       .order('created_at', { ascending: false })
       .limit(25)
 
@@ -316,6 +486,17 @@ async function executeYahallaRead(
       .limit(25)
     if (error) throw new Error(`Failed to read agents: ${error.message}`)
     return { success: true, operation: 'agents.list', count: data?.length ?? 0, rows: data ?? [] }
+  }
+
+  if (query.includes('device')) {
+    const { data, error } = await admin
+      .from('devices')
+      .select('id,name,platform,status,last_heartbeat_at,paired_at')
+      .eq('owner_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(25)
+    if (error) throw new Error(`Failed to read devices: ${error.message}`)
+    return { success: true, operation: 'devices.list', count: data?.length ?? 0, rows: data ?? [] }
   }
 
   if (query.includes('tool')) {
@@ -345,7 +526,7 @@ async function executeYahallaRead(
       .from('tasks')
       .select('id,title,status,priority,created_at,updated_at')
       .eq('assigned_agent', runtimeAgent?.id ?? '')
-      .in('status', ['pending', 'queued', 'running', 'waiting_approval'])
+      .in('status', ['pending', 'queued', 'running', 'waiting_approval', 'waiting_device'])
       .order('created_at', { ascending: false })
       .limit(25)
     if (openTasksError) throw new Error(`Failed to read runtime tasks: ${openTasksError.message}`)
@@ -370,6 +551,13 @@ async function executeYahallaRead(
       .order('created_at', { ascending: false })
     if (serversError) throw new Error(`Failed to read servers: ${serversError.message}`)
 
+    const { data: devices, error: devicesError } = await admin
+      .from('devices')
+      .select('id,name,platform,status,last_heartbeat_at')
+      .eq('owner_id', userId)
+      .order('created_at', { ascending: false })
+    if (devicesError) throw new Error(`Failed to read devices: ${devicesError.message}`)
+
     return {
       success: true,
       operation: 'runtime.status',
@@ -383,6 +571,7 @@ async function executeYahallaRead(
       recent_executions: { count: recentExecutions?.length ?? 0, rows: recentExecutions ?? [] },
       models: { count: models?.length ?? 0, rows: models ?? [] },
       servers: { count: servers?.length ?? 0, rows: servers ?? [] },
+      devices: { count: devices?.length ?? 0, rows: devices ?? [] },
       message: runtimeAgent?.status === 'active'
         ? 'Yahalla Core Runtime is active.'
         : 'Yahalla Core Runtime is not active.',
@@ -450,19 +639,11 @@ async function executeTool(
         message: 'github.read is registered but its GitHub adapter is not connected yet.',
       }
 
-    case 'read_project_file':
-    case 'write_project_file':
-    case 'patch_project_file':
-    case 'git_status':
-    case 'git_diff':
-    case 'run_project_command':
-      return {
-        success: false,
-        operation: tool.key,
-        message: `${tool.key} is registered but requires a local agent runtime (127.0.0.1:8787) to execute. Connect the runtime to enable file and command operations.`,
-      }
-
     default:
+      // Device-scoped tools (files/system category) are intercepted by
+      // isDeviceScopedTool() before this function is ever called in normal
+      // operation -- reaching here means no device was available, or a
+      // tool has no executor at all.
       return {
         success: false,
         operation: tool.key,
@@ -472,25 +653,787 @@ async function executeTool(
 }
 
 // =============================================================
+// Device pairing / identity
+//
+// Each paired device gets its own dedicated Supabase Auth identity (never
+// the service role key, never the owner's own session). RLS
+// (current_device_id() in the device_execution migration) scopes that
+// identity to only the task/tool rows explicitly assigned to it.
+// =============================================================
+
+function generatePairingCode(): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const bytes = new Uint8Array(8)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('')
+}
+
+async function handlePairDevice(
+  admin: ReturnType<typeof createClient>,
+  json: (data: unknown, status?: number) => Response,
+  user: { id: string },
+  body: RequestBody,
+): Promise<Response> {
+  const { data: profile } = await admin
+    .from('profiles')
+    .select('id, role')
+    .eq('id', user.id)
+    .maybeSingle()
+
+  if (!profile || !['owner', 'admin'].includes(profile.role)) {
+    return json({ success: false, error: 'Only an owner or admin can pair a device.' }, 403)
+  }
+
+  const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString()
+
+  const { data: pairing, error } = await admin
+    .from('device_pairing_codes')
+    .insert({
+      owner_id: user.id,
+      code: generatePairingCode(),
+      device_name_hint: typeof body.device_name === 'string' ? body.device_name.slice(0, 80) : null,
+      expires_at: expiresAt,
+    })
+    .select('*')
+    .single()
+
+  if (error || !pairing) {
+    return json({ success: false, error: 'Failed to create pairing code.', details: error?.message }, 500)
+  }
+
+  return json({ success: true, pairing_code: pairing.code, expires_at: pairing.expires_at })
+}
+
+async function handleDeviceExchange(
+  admin: ReturnType<typeof createClient>,
+  json: (data: unknown, status?: number) => Response,
+  body: RequestBody,
+): Promise<Response> {
+  const code = body.pairing_code?.trim().toUpperCase()
+
+  if (!code) {
+    return json({ success: false, error: 'pairing_code is required.' }, 400)
+  }
+
+  const { data: pairing, error: pairingError } = await admin
+    .from('device_pairing_codes')
+    .select('*')
+    .eq('code', code)
+    .is('consumed_at', null)
+    .maybeSingle()
+
+  if (pairingError) {
+    return json({ success: false, error: 'Failed to look up pairing code.', details: pairingError.message }, 500)
+  }
+  if (!pairing) {
+    return json({ success: false, error: 'Invalid or already-used pairing code.' }, 404)
+  }
+  if (new Date(pairing.expires_at).getTime() < Date.now()) {
+    return json({ success: false, error: 'Pairing code has expired. Generate a new one from the Devices page.' }, 410)
+  }
+
+  const platform = ['macos', 'windows', 'linux'].includes(body.device_platform ?? '')
+    ? (body.device_platform as string)
+    : 'other'
+
+  const deviceEmail = `device+${crypto.randomUUID()}@device.yahalla.local`
+  const devicePassword = crypto.randomUUID() + crypto.randomUUID()
+
+  const { data: created, error: createUserError } = await admin.auth.admin.createUser({
+    email: deviceEmail,
+    password: devicePassword,
+    email_confirm: true,
+    user_metadata: { yahalla_device: true },
+  })
+
+  if (createUserError || !created?.user) {
+    return json({ success: false, error: 'Failed to create device identity.', details: createUserError?.message }, 500)
+  }
+
+  const { data: device, error: deviceError } = await admin
+    .from('devices')
+    .insert({
+      owner_id: pairing.owner_id,
+      auth_user_id: created.user.id,
+      name: pairing.device_name_hint || `${platform} device`,
+      platform,
+      status: 'online',
+      last_heartbeat_at: new Date().toISOString(),
+      paired_at: new Date().toISOString(),
+    })
+    .select('*')
+    .single()
+
+  if (deviceError || !device) {
+    await admin.auth.admin.deleteUser(created.user.id).catch(() => {})
+    return json({ success: false, error: 'Failed to register device.', details: deviceError?.message }, 500)
+  }
+
+  const { data: session, error: signInError } = await admin.auth.signInWithPassword({
+    email: deviceEmail,
+    password: devicePassword,
+  })
+
+  if (signInError || !session?.session) {
+    return json({ success: false, error: 'Device registered but failed to establish a session.', details: signInError?.message }, 500)
+  }
+
+  await admin
+    .from('device_pairing_codes')
+    .update({ consumed_at: new Date().toISOString(), device_id: device.id })
+    .eq('id', pairing.id)
+    .is('consumed_at', null)
+
+  return json({
+    success: true,
+    device_id: device.id,
+    device_name: device.name,
+    access_token: session.session.access_token,
+    refresh_token: session.session.refresh_token,
+    supabase_url: Deno.env.get('SUPABASE_URL'),
+    supabase_anon_key: Deno.env.get('SUPABASE_ANON_KEY'),
+  })
+}
+
+async function handleDeviceHeartbeat(
+  admin: ReturnType<typeof createClient>,
+  json: (data: unknown, status?: number) => Response,
+  user: { id: string },
+  body: RequestBody,
+): Promise<Response> {
+  const { data: device, error } = await admin
+    .from('devices')
+    .update({
+      status: 'online',
+      last_heartbeat_at: new Date().toISOString(),
+      capabilities: body.device_capabilities ?? undefined,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('auth_user_id', user.id)
+    .neq('status', 'revoked')
+    .select('id, name, status')
+    .maybeSingle()
+
+  if (error) {
+    return json({ success: false, error: 'Failed to record heartbeat.', details: error.message }, 500)
+  }
+  if (!device) {
+    return json({ success: false, error: 'This session is not a paired device (or it was revoked).' }, 403)
+  }
+
+  return json({ success: true, device_id: device.id, status: device.status })
+}
+
+async function resolveOnlineDeviceForOwner(
+  admin: ReturnType<typeof createClient>,
+  ownerId: string,
+) {
+  const { data: device } = await admin
+    .from('devices')
+    .select('id, name, status')
+    .eq('owner_id', ownerId)
+    .eq('status', 'online')
+    .order('last_heartbeat_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  return device
+}
+
+// =============================================================
+// Shared agent-loop context, reused by the initial chat request and by
+// resume_task (a device calling back in after finishing a dispatched
+// tool).
+// =============================================================
+
+async function loadAgentToolsAndMemory(
+  admin: ReturnType<typeof createClient>,
+  agentId: string,
+  userId: string,
+) {
+  const { data: permissions, error: permissionsError } = await admin
+    .from('agent_permissions')
+    .select('permission_id, permissions (id, key)')
+    .eq('agent_id', agentId)
+
+  if (permissionsError) throw new Error(permissionsError.message)
+
+  const { data: toolRows, error: toolsError } = await admin
+    .from('agent_tools')
+    .select('enabled, tool_id, tools (id, key, category, status, requires_approval, configuration)')
+    .eq('agent_id', agentId)
+    .eq('enabled', true)
+
+  if (toolsError) throw new Error(toolsError.message)
+
+  const availableTools: ToolDefinition[] = (toolRows ?? [])
+    .map((item: any) => {
+      const tool = item.tools
+      if (!tool || tool.status !== 'active') return null
+      return {
+        id: tool.id,
+        key: tool.key,
+        category: tool.category,
+        requires_approval: Boolean(tool.requires_approval),
+        configuration: tool.configuration ?? {},
+      }
+    })
+    .filter(Boolean) as ToolDefinition[]
+
+  const permissionKeys: string[] = (permissions ?? [])
+    .map((item: any) => item.permissions?.key)
+    .filter(Boolean)
+
+  const { data: memories } = await admin
+    .from('ai_memory')
+    .select('*')
+    .or(`scope.eq.global,owner_id.eq.${userId}`)
+    .order('importance', { ascending: false })
+    .limit(20)
+
+  const memoryContext = (memories ?? []).map((memory: any) => ({
+    key: memory.memory_key,
+    content: memory.content,
+    importance: memory.importance,
+  }))
+
+  return { availableTools, permissionKeys, memoryContext, memoryCount: memories?.length ?? 0 }
+}
+
+async function loadModelsAndSelect(
+  admin: ReturnType<typeof createClient>,
+  preferredModelId: string | null,
+  fallbackModelId: string | null,
+) {
+  const { data: allModels } = await admin
+    .from('models')
+    .select('id,key,name,provider,type,endpoint,status,priority,enabled,is_local,configuration,server_id')
+    .order('priority', { ascending: false })
+
+  const modelsList: ModelRow[] = (allModels ?? []).map((m: any) => ({
+    id: m.id, key: m.key, name: m.name, provider: m.provider, type: m.type,
+    endpoint: m.endpoint, status: m.status, priority: m.priority, enabled: m.enabled,
+    is_local: m.is_local, configuration: m.configuration ?? {}, server_id: m.server_id,
+  }))
+
+  const selectedModel = selectModelWithFallback(modelsList, preferredModelId, fallbackModelId, 'general')
+
+  return { modelsList, selectedModel }
+}
+
+type AgentLoopContext = {
+  admin: ReturnType<typeof createClient>
+  json: (data: unknown, status?: number) => Response
+  llmUrl: string
+  llmApiKey: string | undefined
+  llmTimeoutMs: number
+  user: { id: string }
+  task: { id: string; conversation_id: string | null; description?: string | null; input?: any }
+  agent: AgentRow
+  selectedModel: ModelRow
+  availableTools: ToolDefinition[]
+  permissionKeys: string[]
+  memoryContext: any[]
+  memoryCount: number
+  conversationId: string
+  messages: any[]
+  executedTools: any[]
+}
+
+async function runAgentLoop(ctx: AgentLoopContext): Promise<Response> {
+  const {
+    admin, json, llmUrl, llmApiKey, llmTimeoutMs, user, task, agent, selectedModel,
+    availableTools, permissionKeys, memoryContext, memoryCount, conversationId,
+    messages, executedTools,
+  } = ctx
+
+  const message: string = task.description ?? task.input?.message ?? ''
+  const llmTools = availableTools.map(buildOpenAITool)
+  const maxToolRounds = 5
+
+  let finalLLMData: any = null
+
+  for (let round = 0; round < maxToolRounds; round++) {
+    const llmPayload = {
+      model: selectedModel.key,
+      messages,
+      user_id: user.id,
+      task_id: task.id,
+      agent: { key: agent.key, configuration: agent.configuration },
+      permissions: permissionKeys,
+      tools: llmTools,
+      memory: memoryContext,
+    }
+
+    console.log(`Calling Yahalla LLM round ${round + 1} with model ${selectedModel.key}`)
+
+    const llmCallResult = await callLLM(llmUrl, llmPayload, llmApiKey, llmTimeoutMs)
+
+    if (!llmCallResult.ok) {
+      await admin.from('tasks').update({
+        status: 'failed',
+        error: { message: 'LLM request failed.', details: llmCallResult.errorMessage },
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq('id', task.id)
+
+      return json({
+        success: false,
+        error: 'Yahalla LLM request failed.',
+        task_id: task.id,
+        conversation_id: conversationId,
+        details: llmCallResult.errorMessage,
+      }, 502)
+    }
+
+    const { response, data, rawText } = llmCallResult
+    finalLLMData = data
+
+    if (!response.ok) {
+      await admin.from('tasks').update({
+        status: 'failed',
+        error: { message: 'LLM request failed.', status: response.status, response: rawText.slice(0, 4000) },
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq('id', task.id)
+
+      return json({
+        success: false,
+        error: 'Yahalla LLM request failed.',
+        task_id: task.id,
+        conversation_id: conversationId,
+        llm_status: response.status,
+        details: rawText.slice(0, 4000),
+      }, 502)
+    }
+
+    const toolCalls = extractToolCalls(data)
+
+    if (!toolCalls.length) {
+      const answer = extractText(data)
+
+      if (!answer) {
+        await admin.from('tasks').update({
+          status: 'failed',
+          error: { message: 'LLM returned no usable answer.', response: data },
+          completed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq('id', task.id)
+
+        return json({
+          success: false,
+          error: 'LLM returned no usable answer.',
+          task_id: task.id,
+          conversation_id: conversationId,
+          raw_response: data,
+        }, 502)
+      }
+
+      await admin.from('tasks').update({
+        status: 'completed',
+        output: { answer, provider_response: finalLLMData, executed_tools: executedTools },
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq('id', task.id)
+
+      await admin.from('conversation_messages').insert({
+        conversation_id: conversationId,
+        role: 'assistant',
+        content: answer,
+        agent_id: agent.id,
+        model_id: selectedModel.id,
+        task_id: task.id,
+        tool_activity: executedTools,
+        metadata: { model: selectedModel.key },
+      })
+
+      await admin.from('ai_memory').insert({
+        scope: 'user',
+        owner_id: user.id,
+        agent_id: agent.id,
+        task_id: task.id,
+        memory_key: `conversation:${conversationId}`,
+        content: `User: ${message}\nYahalla: ${answer}`,
+        metadata: { type: 'conversation', tools: executedTools.map((i) => i.tool) },
+        importance: 30,
+      })
+
+      return json({
+        success: true,
+        task_id: task.id,
+        conversation_id: conversationId,
+        status: 'completed',
+        answer,
+        agent: { id: agent.id, key: agent.key, name_ar: agent.name_ar, name_de: agent.name_de, status: agent.status, role: agent.role },
+        model: { id: selectedModel.id, key: selectedModel.key, name: selectedModel.name, type: selectedModel.type },
+        permissions: permissionKeys,
+        tools: availableTools.map((t) => ({ key: t.key, category: t.category, requires_approval: t.requires_approval })),
+        executed_tools: executedTools,
+        memory_count: memoryCount,
+      })
+    }
+
+    const assistantMessage = extractMessage(data)
+    messages.push({ role: 'assistant', content: assistantMessage?.content ?? null, tool_calls: toolCalls })
+
+    for (const toolCall of toolCalls) {
+      const toolName = toolCall.function.name
+      const tool = availableTools.find((t) => t.key === toolName)
+
+      if (!tool) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          name: toolName,
+          content: JSON.stringify({ success: false, error: `Tool "${toolName}" is not available to this agent.` }),
+        })
+        continue
+      }
+
+      const args = parseToolArguments(toolCall.function.arguments)
+      console.log('Tool requested:', toolName, args)
+
+      const { data: execution, error: executionError } = await admin
+        .from('tool_executions')
+        .insert({
+          tool_id: tool.id,
+          agent_id: agent.id,
+          task_id: task.id,
+          requested_by: user.id,
+          status: tool.requires_approval ? 'pending' : 'running',
+          input: args,
+        })
+        .select('*')
+        .single()
+
+      if (executionError) {
+        throw new Error(`Failed to create tool execution: ${executionError.message}`)
+      }
+
+      if (tool.requires_approval) {
+        await admin.from('tasks').update({
+          status: 'waiting_approval',
+          updated_at: new Date().toISOString(),
+        }).eq('id', task.id)
+
+        const { data: approval, error: approvalError } = await admin
+          .from('approvals')
+          .insert({
+            tool_execution_id: execution.id,
+            task_id: task.id,
+            requested_by: user.id,
+            status: 'pending',
+            reason: `Yahalla AI requested tool "${toolName}".`,
+          })
+          .select('*')
+          .single()
+
+        if (approvalError || !approval) {
+          await admin.from('tool_executions').update({
+            status: 'failed',
+            error: { message: 'Failed to create approval request.' },
+            completed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }).eq('id', execution.id)
+
+          await admin.from('tasks').update({
+            status: 'failed',
+            error: { message: 'Failed to create approval request.' },
+            updated_at: new Date().toISOString(),
+          }).eq('id', task.id)
+
+          return json({
+            success: false,
+            error: 'Failed to create approval request.',
+            task_id: task.id,
+            conversation_id: conversationId,
+            tool_execution_id: execution.id,
+          }, 500)
+        }
+
+        await admin.from('tool_execution_logs').insert({
+          execution_id: execution.id,
+          level: 'info',
+          message: 'Tool execution is waiting for approval.',
+          data: { tool: toolName, arguments: args },
+        })
+
+        return json({
+          success: true,
+          task_id: task.id,
+          conversation_id: conversationId,
+          status: 'waiting_approval',
+          answer: `هذه العملية تحتاج موافقة قبل تنفيذ أداة ${toolName}.`,
+          approval_required: true,
+          tool_execution_id: execution.id,
+        })
+      }
+
+      if (isDeviceScopedTool(tool)) {
+        const device = await resolveOnlineDeviceForOwner(admin, user.id)
+
+        if (!device) {
+          const result = {
+            success: false,
+            error: `No paired device is currently online to run "${toolName}". Pair and start the Yahalla Device Agent on your computer, then try again.`,
+          }
+
+          await admin.from('tool_executions').update({
+            status: 'failed',
+            error: result,
+            completed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }).eq('id', execution.id)
+
+          executedTools.push({ tool: toolName, execution_id: execution.id, arguments: args, result })
+          messages.push({ role: 'tool', tool_call_id: toolCall.id, name: toolName, content: JSON.stringify(result) })
+          continue
+        }
+
+        await admin.from('tool_executions').update({
+          status: 'pending',
+          assigned_device: device.id,
+          updated_at: new Date().toISOString(),
+        }).eq('id', execution.id)
+
+        await admin.from('tasks').update({
+          status: 'waiting_device',
+          assigned_device: device.id,
+          checkpoint: {
+            messages,
+            executedTools,
+            pending_tool_call_id: toolCall.id,
+            pending_tool_name: toolName,
+            pending_tool_execution_id: execution.id,
+          },
+          updated_at: new Date().toISOString(),
+        }).eq('id', task.id)
+
+        await admin.from('task_logs').insert({
+          task_id: task.id,
+          level: 'info',
+          message: `Dispatched "${toolName}" to device "${device.name}".`,
+          data: { tool: toolName, device_id: device.id },
+        })
+
+        return json({
+          success: true,
+          task_id: task.id,
+          conversation_id: conversationId,
+          status: 'waiting_device',
+          answer: `تنفيذ "${toolName}" على جهازك (${device.name})...`,
+          device_dispatch: true,
+          device_name: device.name,
+          tool_execution_id: execution.id,
+        })
+      }
+
+      let result: any
+      try {
+        result = await executeTool(admin, tool, args, user.id)
+
+        await admin.from('tool_executions').update({
+          status: 'completed',
+          output: result,
+          completed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq('id', execution.id)
+
+        await admin.from('tool_execution_logs').insert({
+          execution_id: execution.id,
+          level: 'info',
+          message: 'Tool executed successfully.',
+          data: result,
+        })
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Tool execution failed.'
+
+        await admin.from('tool_executions').update({
+          status: 'failed',
+          error: { message: errorMessage },
+          completed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq('id', execution.id)
+
+        await admin.from('tool_execution_logs').insert({
+          execution_id: execution.id,
+          level: 'error',
+          message: errorMessage,
+          data: { tool: toolName },
+        })
+
+        result = { success: false, error: errorMessage }
+      }
+
+      executedTools.push({ tool: toolName, execution_id: execution.id, arguments: args, result })
+      messages.push({ role: 'tool', tool_call_id: toolCall.id, name: toolName, content: JSON.stringify(result) })
+    }
+  }
+
+  await admin.from('tasks').update({
+    status: 'failed',
+    error: { message: 'Maximum tool execution rounds exceeded.' },
+    completed_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }).eq('id', task.id)
+
+  return json({
+    success: false,
+    error: 'Maximum tool execution rounds exceeded.',
+    task_id: task.id,
+    conversation_id: conversationId,
+    executed_tools: executedTools,
+  }, 502)
+}
+
+// =============================================================
 // Main handler
 // =============================================================
 
 Deno.serve(async (req) => {
+  const corsHeaders = buildCorsHeaders(req.headers.get('origin'))
+  const json = (data: unknown, status = 200) => jsonWithHeaders(data, status, corsHeaders)
+
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 200, headers: corsHeaders })
+  }
+
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  const llmUrlEnv = Deno.env.get('YAHALLA_LLM_URL')
+  const llmApiKey = Deno.env.get('YAHALLA_LLM_API_KEY') || undefined
+  const llmTimeoutMs = (() => {
+    const raw = Deno.env.get('YAHALLA_LLM_TIMEOUT_MS')
+    const parsed = raw ? Number(raw) : NaN
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 45000
+  })()
+
+  // ---------------------------------------------------------------------
+  // Observability: /health, /ready, /v1/runtime (no auth required)
+  // ---------------------------------------------------------------------
+  if (req.method === 'GET') {
+    const url = new URL(req.url)
+
+    if (url.pathname.endsWith('/health')) {
+      return json({ success: true, status: 'ok', service: 'yahalla-ai', time: new Date().toISOString() })
+    }
+
+    if (url.pathname.endsWith('/ready')) {
+      const checks: Record<string, boolean> = {
+        supabase_configured: Boolean(supabaseUrl && serviceRoleKey),
+      }
+
+      let llmReachable = false
+
+      if (llmUrlEnv) {
+        try {
+          const controller = new AbortController()
+          const timeoutHandle = setTimeout(() => controller.abort(), 2500)
+          const probe = await fetch(llmUrlEnv, { method: 'OPTIONS', signal: controller.signal }).catch(() => null)
+          clearTimeout(timeoutHandle)
+          llmReachable = probe !== null
+        } catch {
+          llmReachable = false
+        }
+        checks.llm_configured = true
+        checks.llm_reachable = llmReachable
+      } else if (supabaseUrl && serviceRoleKey) {
+        const admin = createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } })
+        const { count } = await admin
+          .from('models')
+          .select('id', { count: 'exact', head: true })
+          .eq('enabled', true)
+          .eq('status', 'online')
+        checks.llm_configured = (count ?? 0) > 0
+        checks.llm_reachable = checks.llm_configured
+      } else {
+        checks.llm_configured = false
+        checks.llm_reachable = false
+      }
+
+      const ready = checks.supabase_configured && checks.llm_configured && checks.llm_reachable
+
+      return json({ success: ready, ready, checks }, ready ? 200 : 503)
+    }
+
+    if (url.pathname.endsWith('/runtime') || url.pathname.endsWith('/v1/runtime')) {
+      if (!supabaseUrl || !serviceRoleKey) {
+        return json({ success: false, error: 'Supabase server configuration is missing.' }, 500)
+      }
+
+      const admin = createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } })
+
+      const { data: runtimeAgent } = await admin
+        .from('agents')
+        .select('key,status,updated_at')
+        .eq('key', 'yahalla-core')
+        .maybeSingle()
+
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+
+      const { data: recentTasks } = await admin
+        .from('tasks')
+        .select('status')
+        .gte('created_at', since)
+        .limit(1000)
+
+      const statusCounts: Record<string, number> = {}
+      for (const row of recentTasks ?? []) {
+        statusCounts[row.status] = (statusCounts[row.status] ?? 0) + 1
+      }
+
+      const { count: onlineDevices } = await admin
+        .from('devices')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'online')
+
+      return json({
+        success: true,
+        service: 'yahalla-ai',
+        time: new Date().toISOString(),
+        agent: {
+          key: runtimeAgent?.key ?? 'yahalla-core',
+          status: runtimeAgent?.status ?? 'unknown',
+          active: runtimeAgent?.status === 'active',
+        },
+        llm: { configured: Boolean(llmUrlEnv), env_url_set: Boolean(llmUrlEnv) },
+        devices_online: onlineDevices ?? 0,
+        tasks_last_24h: statusCounts,
+      })
+    }
+
+    return json({ success: false, error: 'Not found' }, 404)
   }
 
   if (req.method !== 'POST') {
     return json({ success: false, error: 'Method not allowed' }, 405)
   }
 
-  try {
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')
-    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-    const llmUrl = Deno.env.get('YAHALLA_LLM_URL')
+  let createdTaskId: string | undefined
+  let adminForRecovery: ReturnType<typeof createClient> | undefined
 
+  try {
     if (!supabaseUrl || !serviceRoleKey) {
       return json({ success: false, error: 'Supabase server configuration is missing.' }, 500)
+    }
+
+    const admin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    })
+    adminForRecovery = admin
+
+    let body: RequestBody
+    try {
+      body = (await req.json()) as RequestBody
+    } catch {
+      return json({ success: false, error: 'Invalid JSON body.' }, 400)
+    }
+
+    // device_exchange is the one action a device calls before it has a
+    // Supabase session of its own -- authenticated by a one-time pairing
+    // code instead of a Bearer token.
+    if (body.device_action === 'device_exchange') {
+      return await handleDeviceExchange(admin, json, body)
     }
 
     const authorization = req.headers.get('Authorization')
@@ -500,16 +1443,157 @@ Deno.serve(async (req) => {
 
     const token = authorization.replace('Bearer ', '').trim()
 
-    const admin = createClient(supabaseUrl, serviceRoleKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    })
-
     const { data: { user }, error: userError } = await admin.auth.getUser(token)
     if (userError || !user) {
       return json({ success: false, error: 'Invalid authentication token.' }, 401)
     }
 
-    const body = (await req.json()) as RequestBody
+    if (body.device_action === 'pair_device') {
+      return await handlePairDevice(admin, json, user, body)
+    }
+
+    if (body.device_action === 'device_heartbeat') {
+      return await handleDeviceHeartbeat(admin, json, user, body)
+    }
+
+    if (body.device_action === 'resume_task') {
+      const taskId = body.task_id
+      const toolExecutionId = body.tool_execution_id
+
+      if (!taskId || !toolExecutionId) {
+        return json({ success: false, error: 'task_id and tool_execution_id are required to resume a task.' }, 400)
+      }
+
+      const { data: callingDevice } = await admin
+        .from('devices')
+        .select('id, owner_id')
+        .eq('auth_user_id', user.id)
+        .neq('status', 'revoked')
+        .maybeSingle()
+
+      if (!callingDevice) {
+        return json({ success: false, error: 'This session is not a paired device.' }, 403)
+      }
+
+      const { data: task, error: taskLoadError } = await admin
+        .from('tasks')
+        .select('*')
+        .eq('id', taskId)
+        .maybeSingle()
+
+      if (
+        taskLoadError || !task ||
+        task.assigned_device !== callingDevice.id ||
+        task.status !== 'waiting_device'
+      ) {
+        return json({ success: false, error: 'Task not found, not assigned to this device, or not waiting on a device.' }, 404)
+      }
+
+      const { data: execution, error: executionLoadError } = await admin
+        .from('tool_executions')
+        .select('*')
+        .eq('id', toolExecutionId)
+        .eq('task_id', taskId)
+        .eq('assigned_device', callingDevice.id)
+        .maybeSingle()
+
+      if (executionLoadError || !execution) {
+        return json({ success: false, error: 'Tool execution not found.' }, 404)
+      }
+
+      if (execution.status !== 'completed' && execution.status !== 'failed') {
+        return json({ success: false, error: 'Tool execution has not finished yet.' }, 409)
+      }
+
+      const resultPayload = execution.output ?? execution.error ?? { success: false, error: 'No result recorded.' }
+      const checkpoint = (task.checkpoint as Record<string, any>) ?? {}
+
+      createdTaskId = task.id
+
+      if (checkpoint.pending_tool_call_id && checkpoint.pending_tool_execution_id === execution.id) {
+        // Mid-agent-loop resume: the LLM was waiting on this tool's result
+        // to continue reasoning.
+        const { data: agentRow, error: agentLoadError } = await admin
+          .from('agents')
+          .select('id,key,name_ar,name_de,description,status,role,configuration,model_id,fallback_model_id,server_id')
+          .eq('id', task.assigned_agent)
+          .maybeSingle()
+
+        if (agentLoadError || !agentRow) {
+          return json({ success: false, error: 'Agent for this task no longer exists.' }, 500)
+        }
+
+        const { availableTools, permissionKeys, memoryContext, memoryCount } =
+          await loadAgentToolsAndMemory(admin, agentRow.id, task.requested_by)
+
+        const { selectedModel } = await loadModelsAndSelect(
+          admin, task.model_id ?? agentRow.model_id, agentRow.fallback_model_id,
+        )
+
+        if (!selectedModel) {
+          await admin.from('tasks').update({
+            status: 'failed',
+            assigned_device: null,
+            error: { message: 'No model is currently online to resume this task.' },
+            completed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }).eq('id', task.id)
+
+          return json({ success: false, error: 'No model is currently online to resume this task.', task_id: task.id }, 503)
+        }
+
+        const resolvedLLMUrl = await resolveLLMUrl(admin, llmUrlEnv, selectedModel)
+
+        const messages = [...(checkpoint.messages ?? [])]
+        messages.push({
+          role: 'tool',
+          tool_call_id: checkpoint.pending_tool_call_id,
+          name: checkpoint.pending_tool_name,
+          content: JSON.stringify(resultPayload),
+        })
+
+        const executedTools = [
+          ...(checkpoint.executedTools ?? []),
+          { tool: checkpoint.pending_tool_name, execution_id: execution.id, arguments: execution.input, result: resultPayload },
+        ]
+
+        await admin.from('tasks').update({
+          status: 'running',
+          assigned_device: null,
+          checkpoint: {},
+          updated_at: new Date().toISOString(),
+        }).eq('id', task.id)
+
+        return await runAgentLoop({
+          admin, json, llmUrl: resolvedLLMUrl, llmApiKey, llmTimeoutMs,
+          user: { id: task.requested_by }, task, agent: agentRow, selectedModel,
+          availableTools, permissionKeys, memoryContext, memoryCount,
+          conversationId: task.conversation_id, messages, executedTools,
+        })
+      }
+
+      // No LLM checkpoint: this device dispatch came from a directly
+      // approved tool call, not from mid-conversation tool routing.
+      // Finalize the task the same way the non-device approval path does.
+      const finished = execution.status === 'completed'
+
+      await admin.from('tasks').update({
+        status: finished ? 'completed' : 'failed',
+        assigned_device: null,
+        output: finished ? { tool_execution_id: execution.id, tool_result: resultPayload } : task.output,
+        error: finished ? null : resultPayload,
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq('id', task.id)
+
+      return json({
+        success: finished,
+        status: finished ? 'completed' : 'failed',
+        task_id: task.id,
+        tool_execution_id: execution.id,
+        result: resultPayload,
+      })
+    }
 
     // -------------------------------------------------------
     // Approval action
@@ -544,7 +1628,11 @@ Deno.serve(async (req) => {
       }
 
       const newStatus = body.approval_action === 'approve' ? 'approved' : 'rejected'
-      const { error: approvalUpdateError } = await admin
+
+      // Compare-and-swap: if no row matched, another concurrent request
+      // already decided this approval. Do not proceed to execute (or
+      // re-reject) the tool a second time.
+      const { data: updatedApproval, error: approvalUpdateError } = await admin
         .from('approvals')
         .update({
           status: newStatus,
@@ -554,9 +1642,19 @@ Deno.serve(async (req) => {
         })
         .eq('id', approval.id)
         .eq('status', 'pending')
+        .select('id')
+        .maybeSingle()
 
       if (approvalUpdateError) {
         return json({ success: false, error: 'Failed to update approval.' }, 500)
+      }
+      if (!updatedApproval) {
+        return json({
+          success: false,
+          error: 'This approval was already decided by another request.',
+          task_id: approval.task_id,
+          tool_execution_id: body.tool_execution_id,
+        }, 409)
       }
 
       if (body.approval_action === 'reject') {
@@ -602,6 +1700,56 @@ Deno.serve(async (req) => {
 
       if (toolLookupError || !tool) {
         return json({ success: false, error: 'Tool definition not found.' }, 404)
+      }
+
+      if (isDeviceScopedTool(tool)) {
+        const device = await resolveOnlineDeviceForOwner(admin, execution.requested_by)
+
+        if (!device) {
+          const errorMessage = `No paired device is currently online to run "${tool.key}". Pair and start the Yahalla Device Agent on your computer and try again.`
+
+          await admin.from('tool_executions').update({
+            status: 'failed',
+            error: { message: errorMessage },
+            completed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }).eq('id', body.tool_execution_id)
+
+          await admin.from('tasks').update({
+            status: 'failed',
+            error: { message: errorMessage },
+            updated_at: new Date().toISOString(),
+          }).eq('id', approval.task_id)
+
+          return json({ success: false, error: errorMessage, task_id: approval.task_id, tool_execution_id: body.tool_execution_id }, 503)
+        }
+
+        await admin.from('tool_executions').update({
+          status: 'pending',
+          assigned_device: device.id,
+          updated_at: new Date().toISOString(),
+        }).eq('id', body.tool_execution_id)
+
+        await admin.from('tasks').update({
+          status: 'waiting_device',
+          assigned_device: device.id,
+          updated_at: new Date().toISOString(),
+        }).eq('id', approval.task_id)
+
+        await admin.from('tool_execution_logs').insert({
+          execution_id: body.tool_execution_id,
+          level: 'info',
+          message: `Approved; dispatched "${tool.key}" to device "${device.name}".`,
+          data: { device_id: device.id },
+        })
+
+        return json({
+          success: true,
+          status: 'waiting_device',
+          task_id: approval.task_id,
+          tool_execution_id: body.tool_execution_id,
+          device_name: device.name,
+        })
       }
 
       try {
@@ -676,12 +1824,18 @@ Deno.serve(async (req) => {
       return json({ success: false, error: 'Message is too long.' }, 400)
     }
 
-    // Load profile
-    const { data: profile } = await admin
-      .from('profiles')
-      .select('id, role, email, full_name')
-      .eq('id', user.id)
-      .maybeSingle()
+    const rateLimitWindowStart = new Date(Date.now() - 60_000).toISOString()
+    const { count: recentTaskCount, error: rateLimitError } = await admin
+      .from('tasks')
+      .select('id', { count: 'exact', head: true })
+      .eq('requested_by', user.id)
+      .gte('created_at', rateLimitWindowStart)
+
+    if (rateLimitError) {
+      console.error('Rate limit check failed:', rateLimitError)
+    } else if ((recentTaskCount ?? 0) >= 12) {
+      return json({ success: false, error: 'Too many requests. Please wait a moment before sending another message.' }, 429)
+    }
 
     // Load or create conversation
     let conversationId = body.conversation_id
@@ -702,14 +1856,12 @@ Deno.serve(async (req) => {
       conversationId = newConv.id
     }
 
-    // Store user message
     await admin.from('conversation_messages').insert({
       conversation_id: conversationId,
       role: 'user',
       content: message,
     })
 
-    // Load agent (default: yahalla-core, or specified)
     const agentKey = body.agent_key || 'yahalla-core'
     const { data: agent, error: agentError } = await admin
       .from('agents')
@@ -725,72 +1877,13 @@ Deno.serve(async (req) => {
       return json({ success: false, error: `Agent "${agentKey}" is not configured or active.` }, 503)
     }
 
-    // Load all models for routing
-    const { data: allModels } = await admin
-      .from('models')
-      .select('id,key,name,provider,type,endpoint,status,priority,enabled,is_local,configuration,server_id')
-      .order('priority', { ascending: false })
-
-    const modelsList: ModelRow[] = (allModels ?? []).map((m: any) => ({
-      id: m.id, key: m.key, name: m.name, provider: m.provider, type: m.type,
-      endpoint: m.endpoint, status: m.status, priority: m.priority, enabled: m.enabled,
-      is_local: m.is_local, configuration: m.configuration ?? {}, server_id: m.server_id,
-    }))
-
-    // Select model
-    const selectedModel = selectModelWithFallback(
-      modelsList,
-      body.model_id ?? agent.model_id,
-      agent.fallback_model_id,
-      'general',
+    const { selectedModel } = await loadModelsAndSelect(
+      admin, body.model_id ?? agent.model_id, agent.fallback_model_id,
     )
 
-    // Load agent permissions
-    const { data: permissions, error: permissionsError } = await admin
-      .from('agent_permissions')
-      .select('permission_id, permissions (id, key)')
-      .eq('agent_id', agent.id)
+    const { availableTools, permissionKeys, memoryContext, memoryCount } =
+      await loadAgentToolsAndMemory(admin, agent.id, user.id)
 
-    if (permissionsError) {
-      return json({ success: false, error: 'Failed to load agent permissions.' }, 500)
-    }
-
-    // Load enabled tools
-    const { data: toolRows, error: toolsError } = await admin
-      .from('agent_tools')
-      .select('enabled, tool_id, tools (id, key, category, status, requires_approval, configuration)')
-      .eq('agent_id', agent.id)
-      .eq('enabled', true)
-
-    if (toolsError) {
-      return json({ success: false, error: 'Failed to load agent tools.' }, 500)
-    }
-
-    const availableTools: ToolDefinition[] = (toolRows ?? [])
-      .map((item: any) => {
-        const tool = item.tools
-        if (!tool || tool.status !== 'active') return null
-        return {
-          id: tool.id, key: tool.key, category: tool.category,
-          requires_approval: Boolean(tool.requires_approval),
-          configuration: tool.configuration ?? {},
-        }
-      })
-      .filter(Boolean)
-
-    const permissionKeys = (permissions ?? [])
-      .map((item: any) => item.permissions?.key)
-      .filter(Boolean)
-
-    // Load memory
-    const { data: memories } = await admin
-      .from('ai_memory')
-      .select('*')
-      .or(`scope.eq.global,owner_id.eq.${user.id}`)
-      .order('importance', { ascending: false })
-      .limit(20)
-
-    // Load recent conversation messages for context
     const { data: recentMessages } = await admin
       .from('conversation_messages')
       .select('role, content, created_at')
@@ -820,7 +1913,8 @@ Deno.serve(async (req) => {
       return json({ success: false, error: 'Failed to create task.', details: taskError.message }, 500)
     }
 
-    // Audit log
+    createdTaskId = task.id
+
     await admin.from('audit_logs').insert({
       actor_user_id: user.id,
       agent_id: agent.id,
@@ -831,15 +1925,15 @@ Deno.serve(async (req) => {
       details: { agent: agent.key, message_length: message.length, conversation_id: conversationId },
     })
 
-    // If no model is online, return a clear error
     if (!selectedModel) {
       await admin.from('tasks').update({
         status: 'failed',
         error: { message: 'No model is currently online. Start a local LLM server and update model status.' },
+        completed_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }).eq('id', task.id)
 
-      const errorMsg = 'No AI model is currently online. The platform requires at least one enabled model with status "online". Start a local LLM server (e.g. on 127.0.0.1:8080) and update the model status in the admin control center.'
+      const errorMsg = 'No AI model is currently online. The platform requires at least one enabled model with status "online" (or set YAHALLA_LLM_URL). Start a local LLM server and update the model status in the admin control center.'
 
       await admin.from('conversation_messages').insert({
         conversation_id: conversationId,
@@ -859,28 +1953,7 @@ Deno.serve(async (req) => {
       }, 503)
     }
 
-    // Load server for the selected model
-    let serverHostname = '127.0.0.1'
-    let serverPort = 8080
-    if (selectedModel.server_id) {
-      const { data: server } = await admin
-        .from('servers')
-        .select('hostname, port')
-        .eq('id', selectedModel.server_id)
-        .maybeSingle()
-      if (server) {
-        serverHostname = server.hostname
-        serverPort = server.port
-      }
-    }
-
-    const actualLLMUrl = llmUrl || buildLLMUrl(selectedModel, serverHostname, serverPort)
-
-    const memoryContext = (memories ?? []).map((m: any) => ({
-      key: m.memory_key, content: m.content, importance: m.importance,
-    }))
-
-    const llmTools = availableTools.map(buildOpenAITool)
+    const actualLLMUrl = await resolveLLMUrl(admin, llmUrlEnv, selectedModel)
 
     const systemPrompt = `
 You are Yahalla AI Core, the central AI runtime for the Yahalla AI Operating System.
@@ -901,12 +1974,11 @@ Runtime rules:
 - For questions about Yahalla Core Runtime, runtime state, or runtime health, use yahalla.read with a query containing "runtime status".
 - Do not use web.search for internal Yahalla system/runtime state.
 - Never claim the runtime is active merely because a task was accepted or completed. Verify runtime status using yahalla.read.
-- For coding tasks, use read_project_file, write_project_file, patch_project_file, and run_project_command.
-- Always read a file before patching it.
-- After modifications, verify the result.
+- For coding/UI tasks: first use list_project_files/read_project_file to find the right file before editing -- never guess a file path.
+- Always read a file before patching it; old_text must be copied verbatim from that read.
+- After modifications, use git_diff or read_project_file again to verify the result before reporting success.
 `.trim()
 
-    // Build conversation messages (reverse chronological -> chronological)
     const historyMessages: any[] = []
     if (recentMessages && recentMessages.length > 0) {
       const sorted = [...recentMessages].reverse()
@@ -919,289 +1991,34 @@ Runtime rules:
 
     const baseMessages: any[] = [
       { role: 'system', content: systemPrompt },
-      ...historyMessages.slice(0, -1), // exclude the last user message (we'll add it fresh)
+      ...historyMessages.slice(0, -1),
       { role: 'user', content: message },
     ]
 
-    const maxToolRounds = 5
-    let llmMessages = [...baseMessages]
-    let finalLLMData: any = null
-    const executedTools: any[] = []
+    return await runAgentLoop({
+      admin, json, llmUrl: actualLLMUrl, llmApiKey, llmTimeoutMs, user, task, agent, selectedModel,
+      availableTools, permissionKeys, memoryContext, memoryCount, conversationId,
+      messages: [...baseMessages], executedTools: [],
+    })
+  } catch (error) {
+    console.error('Yahalla AI error:', error)
 
-    for (let round = 0; round < maxToolRounds; round++) {
-      const llmPayload = {
-        model: selectedModel.key,
-        messages: llmMessages,
-        user_id: user.id,
-        task_id: task.id,
-        agent: { key: agent.key, configuration: agent.configuration },
-        permissions: permissionKeys,
-        tools: llmTools,
-        memory: memoryContext,
-      }
+    const errorMessage = error instanceof Error ? error.message : 'Internal server error.'
 
-      console.log(`Calling Yahalla LLM round ${round + 1} with model ${selectedModel.key}`)
-
-      const { response, data, rawText } = await callLLM(actualLLMUrl, llmPayload)
-      finalLLMData = data
-
-      if (!response.ok) {
-        await admin.from('tasks').update({
+    if (createdTaskId && adminForRecovery) {
+      try {
+        await adminForRecovery.from('tasks').update({
           status: 'failed',
-          error: { message: 'LLM request failed.', status: response.status, response: rawText.slice(0, 4000) },
-          updated_at: new Date().toISOString(),
-        }).eq('id', task.id)
-
-        return json({
-          success: false,
-          error: 'Yahalla LLM request failed.',
-          task_id: task.id,
-          conversation_id: conversationId,
-          llm_status: response.status,
-          details: rawText.slice(0, 4000),
-        }, 502)
-      }
-
-      const toolCalls = extractToolCalls(data)
-
-      if (!toolCalls.length) {
-        const answer = extractText(data)
-
-        if (!answer) {
-          await admin.from('tasks').update({
-            status: 'failed',
-            error: { message: 'LLM returned no usable answer.', response: data },
-            updated_at: new Date().toISOString(),
-          }).eq('id', task.id)
-
-          return json({
-            success: false,
-            error: 'LLM returned no usable answer.',
-            task_id: task.id,
-            conversation_id: conversationId,
-            raw_response: data,
-          }, 502)
-        }
-
-        await admin.from('tasks').update({
-          status: 'completed',
-          output: { answer, provider_response: finalLLMData, executed_tools: executedTools },
+          error: { message: 'Unhandled runtime error.', details: errorMessage },
           completed_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-        }).eq('id', task.id)
-
-        // Store assistant message
-        await admin.from('conversation_messages').insert({
-          conversation_id: conversationId,
-          role: 'assistant',
-          content: answer,
-          agent_id: agent.id,
-          model_id: selectedModel.id,
-          task_id: task.id,
-          tool_activity: executedTools,
-          metadata: { model: selectedModel.key },
-        })
-
-        // Store memory
-        await admin.from('ai_memory').insert({
-          scope: 'user',
-          owner_id: user.id,
-          agent_id: agent.id,
-          task_id: task.id,
-          memory_key: `conversation:${conversationId}`,
-          content: `User: ${message}\nYahalla: ${answer}`,
-          metadata: { type: 'conversation', tools: executedTools.map((i) => i.tool) },
-          importance: 30,
-        })
-
-        return json({
-          success: true,
-          task_id: task.id,
-          conversation_id: conversationId,
-          status: 'completed',
-          answer,
-          agent: { id: agent.id, key: agent.key, name_ar: agent.name_ar, name_de: agent.name_de, status: agent.status, role: agent.role },
-          model: { id: selectedModel.id, key: selectedModel.key, name: selectedModel.name, type: selectedModel.type },
-          permissions: permissionKeys,
-          tools: availableTools.map((t) => ({ key: t.key, category: t.category, requires_approval: t.requires_approval })),
-          executed_tools: executedTools,
-          memory_count: memories?.length ?? 0,
-        })
-      }
-
-      // Process tool calls
-      const assistantMessage = extractMessage(data)
-      llmMessages.push({
-        role: 'assistant',
-        content: assistantMessage?.content ?? null,
-        tool_calls: toolCalls,
-      })
-
-      for (const toolCall of toolCalls) {
-        const toolName = toolCall.function.name
-        const tool = availableTools.find((t) => t.key === toolName)
-
-        if (!tool) {
-          llmMessages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            name: toolName,
-            content: JSON.stringify({ success: false, error: `Tool "${toolName}" is not available to this agent.` }),
-          })
-          continue
-        }
-
-        const args = parseToolArguments(toolCall.function.arguments)
-        console.log('Tool requested:', toolName, args)
-
-        const { data: execution, error: executionError } = await admin
-          .from('tool_executions')
-          .insert({
-            tool_id: tool.id,
-            agent_id: agent.id,
-            task_id: task.id,
-            requested_by: user.id,
-            status: tool.requires_approval ? 'pending' : 'running',
-            input: args,
-          })
-          .select('*')
-          .single()
-
-        if (executionError) {
-          throw new Error(`Failed to create tool execution: ${executionError.message}`)
-        }
-
-        if (tool.requires_approval) {
-          await admin.from('tasks').update({
-            status: 'waiting_approval',
-            updated_at: new Date().toISOString(),
-          }).eq('id', task.id)
-
-          const { data: approval, error: approvalError } = await admin
-            .from('approvals')
-            .insert({
-              tool_execution_id: execution.id,
-              task_id: task.id,
-              requested_by: user.id,
-              status: 'pending',
-              reason: `Yahalla AI requested tool "${toolName}".`,
-            })
-            .select('*')
-            .single()
-
-          if (approvalError || !approval) {
-            await admin.from('tool_executions').update({
-              status: 'failed',
-              error: { message: 'Failed to create approval request.' },
-              completed_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            }).eq('id', execution.id)
-
-            await admin.from('tasks').update({
-              status: 'failed',
-              error: { message: 'Failed to create approval request.' },
-              updated_at: new Date().toISOString(),
-            }).eq('id', task.id)
-
-            return json({
-              success: false,
-              error: 'Failed to create approval request.',
-              task_id: task.id,
-              conversation_id: conversationId,
-              tool_execution_id: execution.id,
-            }, 500)
-          }
-
-          await admin.from('tool_execution_logs').insert({
-            execution_id: execution.id,
-            level: 'info',
-            message: 'Tool execution is waiting for approval.',
-            data: { tool: toolName, arguments: args },
-          })
-
-          return json({
-            success: true,
-            task_id: task.id,
-            conversation_id: conversationId,
-            status: 'waiting_approval',
-            answer: `هذه العملية تحتاج موافقة قبل تنفيذ أداة ${toolName}.`,
-            approval_required: true,
-            tool_execution_id: execution.id,
-          })
-        }
-
-        let result: any
-        try {
-          result = await executeTool(admin, tool, args, user.id)
-
-          await admin.from('tool_executions').update({
-            status: 'completed',
-            output: result,
-            completed_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          }).eq('id', execution.id)
-
-          await admin.from('tool_execution_logs').insert({
-            execution_id: execution.id,
-            level: 'info',
-            message: 'Tool executed successfully.',
-            data: result,
-          })
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Tool execution failed.'
-
-          await admin.from('tool_executions').update({
-            status: 'failed',
-            error: { message: errorMessage },
-            completed_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          }).eq('id', execution.id)
-
-          await admin.from('tool_execution_logs').insert({
-            execution_id: execution.id,
-            level: 'error',
-            message: errorMessage,
-            data: { tool: toolName },
-          })
-
-          result = { success: false, error: errorMessage }
-        }
-
-        executedTools.push({
-          tool: toolName,
-          execution_id: execution.id,
-          arguments: args,
-          result,
-        })
-
-        llmMessages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          name: toolName,
-          content: JSON.stringify(result),
-        })
+        }).eq('id', createdTaskId)
+          .in('status', ['pending', 'queued', 'running', 'waiting_approval', 'waiting_device'])
+      } catch (recoveryError) {
+        console.error('Failed to mark task as failed after unhandled error:', recoveryError)
       }
     }
 
-    // Max rounds exceeded
-    await admin.from('tasks').update({
-      status: 'failed',
-      error: { message: 'Maximum tool execution rounds exceeded.' },
-      updated_at: new Date().toISOString(),
-    }).eq('id', task.id)
-
-    return json({
-      success: false,
-      error: 'Maximum tool execution rounds exceeded.',
-      task_id: task.id,
-      conversation_id: conversationId,
-      executed_tools: executedTools,
-    }, 502)
-  } catch (error) {
-    console.error('Yahalla AI error:', error)
-    return json({
-      success: false,
-      error: error instanceof Error ? error.message : 'Internal server error.',
-    }, 500)
+    return json({ success: false, error: errorMessage, task_id: createdTaskId }, 500)
   }
 })

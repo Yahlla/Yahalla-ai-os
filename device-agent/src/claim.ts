@@ -10,7 +10,7 @@ type PendingExecution = {
   task_id: string
   tool_id: string
   input: Record<string, unknown>
-  tools: { key: string } | null
+  tools: { key: string; configuration: Record<string, unknown> | null } | null
 }
 
 /**
@@ -41,7 +41,7 @@ export function startClaimLoop(client: SupabaseClient, config: DeviceConfig): ()
 
       const { data: pending, error } = await client
         .from('tool_executions')
-        .select('id, task_id, tool_id, input, tools ( key )')
+        .select('id, task_id, tool_id, input, tools ( key, configuration )')
         .eq('assigned_device', device.id)
         .eq('status', 'pending')
         .order('created_at', { ascending: true })
@@ -81,7 +81,12 @@ export function startClaimLoop(client: SupabaseClient, config: DeviceConfig): ()
       return
     }
 
-    const result = executeDeviceTool(toolKey, cfg.project_root, execution.input ?? {})
+    const result = executeDeviceTool(
+      toolKey,
+      cfg.project_root,
+      execution.input ?? {},
+      execution.tools?.configuration ?? {},
+    )
 
     await c
       .from('tool_executions')

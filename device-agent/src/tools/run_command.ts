@@ -4,41 +4,59 @@ import type { ToolResult } from './files.js'
 const MAX_OUTPUT_BYTES = 200_000
 const COMMAND_TIMEOUT_MS = 120_000
 
-// Only these binaries may ever be spawned by run_project_command, and only
-// with the exact subcommands listed. Everything else — including shells,
-// interpreters run with arbitrary -c strings, and package managers' own
-// "run arbitrary script" escape hatches beyond what's listed — is refused.
-// No shell is ever invoked (spawnSync with shell:false, argv passed as an
-// array), so there is no command-injection surface via arguments.
-const ALLOWED_COMMANDS: Record<string, (subArgs: string[]) => boolean> = {
-  git: () => true,
-  npm: (subArgs) => ['install', 'run', 'test', 'ci', 'run-script'].includes(subArgs[0] ?? ''),
-  node: () => true,
-  npx: () => true,
-  tsc: () => true,
+// The run_project_command tool's allowlist is configuration-driven (see
+// tools.configuration.allowlist, seeded in
+// supabase/migrations/20260810114233_20260810_yahalla_seed_data.sql) so it
+// can be reviewed/edited from the Control Center without a code change.
+// This default only applies if a tool_execution somehow arrives with no
+// configuration attached.
+const DEFAULT_ALLOWLIST = [
+  'npm run build',
+  'npm run lint',
+  'npm test',
+  'tsc --noEmit',
+  'git status',
+  'git diff',
+  'git log',
+]
+
+const ALLOWED_BINARIES = new Set(['git', 'npm', 'node', 'npx', 'tsc'])
+
+/**
+ * Splits an already-allowlisted command string into argv. No shell is ever
+ * invoked (spawnSync with shell:false) -- this only matters for correctly
+ * separating arguments, not for safety, since the full string was already
+ * matched verbatim against the configured allowlist before this runs.
+ */
+function splitCommand(command: string): string[] {
+  return command.trim().split(/\s+/).filter(Boolean)
 }
 
-export function runProjectCommand(projectRoot: string, args: Record<string, unknown>): ToolResult {
-  const command = String(args.command ?? '')
-  const commandArgs = Array.isArray(args.args) ? args.args.map(String) : []
+export function runProjectCommand(
+  projectRoot: string,
+  args: Record<string, unknown>,
+  allowlist: string[] = DEFAULT_ALLOWLIST,
+): ToolResult {
+  const command = String(args.command ?? '').trim()
 
-  const validator = ALLOWED_COMMANDS[command]
-
-  if (!validator) {
+  if (!allowlist.includes(command)) {
     return {
       success: false,
-      error: `Command "${command}" is not allowlisted. Allowed: ${Object.keys(ALLOWED_COMMANDS).join(', ')}.`,
+      error: `Command "${command}" is not in the allowlist. Allowed: ${allowlist.join(', ')}.`,
     }
   }
 
-  if (!validator(commandArgs)) {
+  const argv = splitCommand(command)
+  const binary = argv[0]
+
+  if (!binary || !ALLOWED_BINARIES.has(binary)) {
     return {
       success: false,
-      error: `Command "${command} ${commandArgs.join(' ')}" is not an allowed invocation.`,
+      error: `Command "${command}" resolves to a binary that is not allowlisted.`,
     }
   }
 
-  const result = spawnSync(command, commandArgs, {
+  const result = spawnSync(binary, argv.slice(1), {
     cwd: projectRoot,
     timeout: COMMAND_TIMEOUT_MS,
     maxBuffer: MAX_OUTPUT_BYTES,
