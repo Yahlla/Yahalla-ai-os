@@ -14,7 +14,7 @@ function base64Url(input: Buffer | string): string {
 // cosine-similarity ordering fully predictable in tests without needing a
 // real embedding model.
 function makeEmbedding(primaryIndex: number, magnitude = 1): number[] {
-  const v = new Array(384).fill(0)
+  const v = Array.from({ length: 384 }, () => 0)
   v[primaryIndex] = magnitude
   return v
 }

@@ -2002,13 +2002,13 @@ function ChatSection() {
         <div className="composer-area">
           {error && <div className="composer-error">{error}</div>}
 
-          {modelLoadProgress && !modelLoadStalled && (
-            <div className="composer-error" style={{ background: 'rgba(99,102,241,0.12)', color: 'inherit' }}>
-              جارٍ تحميل النموذج المحلي على هذا الجهاز (مرة واحدة فقط)… {Math.round(modelLoadProgress.progress * 100)}%
-              {modelLoadProgress.text ? ` — ${modelLoadProgress.text}` : ''}
-            </div>
-          )}
-
+          {/* No progress bar/percentage in the normal case -- the background
+              warm-up (started as soon as the page loads, see
+              ensureBrowserModelLoading) means the model is usually already
+              ready by the time a message is sent, and the generic
+              "processing" bubble already covers the rare case it isn't.
+              A visible download banner only earns its place once something
+              is actually wrong: see the stall warning below. */}
           {modelLoadProgress && modelLoadStalled && (
             <div className="composer-error">
               التحميل بطيء جداً أو محجوب من شبكتك الحالية ({Math.round(modelLoadProgress.progress * 100)}% فقط منذ فترة).
