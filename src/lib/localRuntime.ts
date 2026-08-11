@@ -107,6 +107,56 @@ export async function sendChatMessage(params: { message: string; conversation_id
   }
 }
 
+export type LiveUpdate =
+  | { kind: 'embodiment'; state: string; summary: string | null; timestamp: string }
+  | { kind: 'perception'; event: Record<string, unknown> }
+
+// Native EventSource can't send an Authorization header, and this runtime
+// deliberately requires one on every route but /health -- so the live
+// stream is consumed with fetch + a manual SSE line reader instead of
+// EventSource, keeping the same auth model everywhere rather than leaking
+// the token into a URL/query string.
+export async function subscribeLiveStatus(onUpdate: (update: LiveUpdate) => void): Promise<() => void> {
+  const info = await getRuntimeInfo()
+  if (!info) throw new Error('Local Agent Runtime is not reachable from this window.')
+
+  const controller = new AbortController()
+
+  ;(async () => {
+    try {
+      const response = await fetch(`${info.baseUrl}/live/stream`, {
+        headers: { Authorization: `Bearer ${info.authToken}` },
+        signal: controller.signal,
+      })
+      if (!response.ok || !response.body) return
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          const dataLine = line.split('\n').find((l) => l.startsWith('data: '))
+          if (!dataLine) continue
+          try {
+            onUpdate(JSON.parse(dataLine.slice('data: '.length)) as LiveUpdate)
+          } catch {
+            // ignore malformed frame
+          }
+        }
+      }
+    } catch {
+      // stream ended/aborted -- caller's unsubscribe already handles cleanup
+    }
+  })()
+
+  return () => controller.abort()
+}
+
 export async function decideApproval(approvalId: string, decision: 'approve' | 'reject'): Promise<ChatResponse> {
   const response = await runtimeFetch(`/approvals/${approvalId}/decide`, {
     method: 'POST',

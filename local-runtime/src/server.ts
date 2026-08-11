@@ -2,8 +2,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { resumeApproval, runChat, type RuntimeContext } from './agentLoop.js'
 import type { RuntimeConfig } from './config.js'
 import type { Db } from './db.js'
+import { EmbodimentStateMachine } from './embodiment/stateMachine.js'
 import { detectHardware } from './hardware.js'
 import { findLlamaServerBinary, isLlmReachable, LocalModelProcess } from './llm.js'
+import { PermissionRequiredError, PerceptionManager } from './perception/manager.js'
 import {
   addKnowledge,
   addMemory,
@@ -29,6 +31,8 @@ export type ServerDeps = {
   db: Db
   config: RuntimeConfig
   modelProcess: LocalModelProcess
+  embodiment?: EmbodimentStateMachine
+  perception?: PerceptionManager
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -64,17 +68,22 @@ function applyCors(req: IncomingMessage, res: ServerResponse, config: RuntimeCon
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 }
 
-function ctxFrom(deps: ServerDeps): RuntimeContext {
+function ctxFrom(deps: ServerDeps, embodiment: EmbodimentStateMachine, perception: PerceptionManager): RuntimeContext {
   const active = getActiveModel(deps.db)
   return {
     db: deps.db,
     projectRoot: deps.config.projectRoot ?? process.cwd(),
     llmBaseUrl: deps.modelProcess.baseUrl,
     modelKey: active?.key ?? 'local-model',
+    embodiment,
+    worldModel: perception.worldModel,
   }
 }
 
 export function createHttpServer(deps: ServerDeps) {
+  const embodiment = deps.embodiment ?? new EmbodimentStateMachine()
+  const perception = deps.perception ?? new PerceptionManager(deps.db)
+
   return createServer(async (req, res) => {
     applyCors(req, res, deps.config)
 
@@ -173,7 +182,7 @@ export function createHttpServer(deps: ServerDeps) {
         const body = await readJsonBody(req)
         const message = String(body.message ?? '')
         if (!message.trim()) return send(res, 400, { success: false, error: 'message is required.' })
-        const result = await runChat(ctxFrom(deps), message, typeof body.conversation_id === 'string' ? body.conversation_id : undefined)
+        const result = await runChat(ctxFrom(deps, embodiment, perception), message, typeof body.conversation_id === 'string' ? body.conversation_id : undefined)
         return send(res, 200, result)
       }
 
@@ -181,7 +190,7 @@ export function createHttpServer(deps: ServerDeps) {
       if (approvalMatch && req.method === 'POST') {
         const body = await readJsonBody(req)
         const decision = body.decision === 'reject' ? 'reject' : 'approve'
-        const result = await resumeApproval(ctxFrom(deps), approvalMatch[1], decision)
+        const result = await resumeApproval(ctxFrom(deps, embodiment, perception), approvalMatch[1], decision)
         return send(res, 200, result)
       }
 
@@ -258,6 +267,80 @@ export function createHttpServer(deps: ServerDeps) {
         const target = url.searchParams.get('target') ?? '*'
         const access = (url.searchParams.get('access') ?? 'read') as AccessLevel
         return send(res, 200, { allowed: checkAccess(deps.db, scope, target, access) })
+      }
+
+      if (path === '/perception/providers' && req.method === 'GET') {
+        return send(res, 200, { providers: perception.listProviders() })
+      }
+
+      if (path === '/perception/start' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        try {
+          const { sessionId } = await perception.start(String(body.provider ?? 'mock'))
+          return send(res, 200, { success: true, sessionId })
+        } catch (error) {
+          if (error instanceof PermissionRequiredError) {
+            embodiment.transition('NEEDS_PERMISSION', `Camera/microphone permission needed (${error.modality})`)
+            return send(res, 403, { success: false, error: error.message, modality: error.modality })
+          }
+          throw error
+        }
+      }
+
+      if (path === '/perception/stop' && req.method === 'POST') {
+        await perception.stop()
+        return send(res, 200, { success: true })
+      }
+
+      if (path === '/perception/status' && req.method === 'GET') {
+        return send(res, 200, perception.status())
+      }
+
+      if (path === '/perception/world-model' && req.method === 'GET') {
+        return send(res, 200, perception.worldModel.getSnapshot())
+      }
+
+      if (path === '/perception/history' && req.method === 'DELETE') {
+        perception.clearHistory()
+        return send(res, 200, { success: true })
+      }
+
+      // Ingestion point for a real external capture source (a future
+      // browser/native provider that runs its own local vision/speech
+      // model and only ever sends already-derived events here -- never
+      // raw frames/audio). Still gated by an active, permitted session.
+      if (path === '/perception/events' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        try {
+          perception.ingest(body as any)
+          return send(res, 200, { success: true })
+        } catch (error) {
+          return send(res, 409, { success: false, error: error instanceof Error ? error.message : 'Could not ingest event.' })
+        }
+      }
+
+      // One SSE stream carrying both perception events and embodiment
+      // state/status updates, so the frontend has a single live channel
+      // for "what is Yahalla observing" and "what is Yahalla doing".
+      if (path === '/live/stream' && req.method === 'GET') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        })
+        res.write(`data: ${JSON.stringify({ kind: 'embodiment', ...embodiment.getState() })}\n\n`)
+
+        const offPerception = perception.bus.onEvent((event) => {
+          res.write(`data: ${JSON.stringify({ kind: 'perception', event })}\n\n`)
+        })
+        const offEmbodiment = embodiment.onUpdate((update) => {
+          res.write(`data: ${JSON.stringify({ kind: 'embodiment', ...update })}\n\n`)
+        })
+        req.on('close', () => {
+          offPerception()
+          offEmbodiment()
+        })
+        return
       }
 
       send(res, 404, { success: false, error: `No route for ${req.method} ${path}` })

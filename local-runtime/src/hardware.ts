@@ -8,6 +8,22 @@ export type HardwareInfo = {
   totalMemoryBytes: number
   freeMemoryBytes: number
   recommendedTier: 'small' | 'medium' | 'large'
+  perception: PerceptionCapabilityHint
+}
+
+// Node (the local-runtime process) has no portable, dependency-free way to
+// enumerate cameras/microphones or query GPU/NPU presence -- those live
+// behind platform-specific native APIs or the browser's own
+// navigator.mediaDevices/navigator.gpu, which only exist in the Electron
+// renderer (see src/lib/capabilities.ts in the frontend), not here. Rather
+// than guess, this reports the honest boundary: what this process can and
+// cannot determine on its own, and what layer is responsible for the rest.
+export type PerceptionCapabilityHint = {
+  cameraDetectable: false
+  microphoneDetectable: false
+  gpuDetectable: false
+  npuDetectable: false
+  detectVia: 'frontend (navigator.mediaDevices / navigator.gpu) or a future native platform module'
 }
 
 // Best-effort, dependency-free hardware read. GPU detection is
@@ -37,5 +53,12 @@ export function detectHardware(): HardwareInfo {
     totalMemoryBytes,
     freeMemoryBytes: freemem(),
     recommendedTier,
+    perception: {
+      cameraDetectable: false,
+      microphoneDetectable: false,
+      gpuDetectable: false,
+      npuDetectable: false,
+      detectVia: 'frontend (navigator.mediaDevices / navigator.gpu) or a future native platform module',
+    },
   }
 }

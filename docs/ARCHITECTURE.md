@@ -176,6 +176,14 @@ a model, `llama-server` on `PATH` (or any other local OpenAI-compatible server â
 point `local-runtime`'s active model's process at it, or just run your own
 server on `127.0.0.1:8766` before starting the runtime).
 
+## Human perception & embodiment
+
+See [PERCEPTION_EMBODIMENT.md](PERCEPTION_EMBODIMENT.md) for the local
+perception pipeline (camera/mic gated behind explicit permission, a
+provider interface with a tested mock implementation, a local world model,
+and an embodied-agent state machine) that extends this same local-first
+runtime -- no cloud vision/speech API, no change to the architecture above.
+
 ## Known limitations, honestly
 
 - `local-runtime`'s model download/verification mechanism is implemented and

@@ -1,10 +1,12 @@
 import { executeDeviceTool } from '@yahalla/agent-tools'
 import type { Db } from './db.js'
 import { newId } from './db.js'
+import type { EmbodimentStateMachine } from './embodiment/stateMachine.js'
 import { githubRead, githubWrite } from './github.js'
 import { chatCompletion } from './llm.js'
 import { addMemory, getPreference, recordTaskFeedback } from './memory.js'
 import { checkAccess } from './permissions.js'
+import type { WorldModel } from './perception/worldModel.js'
 import { buildOpenAITools, DEFAULT_RUN_COMMAND_ALLOWLIST, getTool, type ToolDef } from './tools.js'
 
 export type ChatMessage = { role: string; content: string | null; tool_calls?: any; tool_call_id?: string; name?: string }
@@ -26,13 +28,16 @@ export type RuntimeContext = {
   projectRoot: string
   llmBaseUrl: string
   modelKey: string
+  embodiment: EmbodimentStateMachine
+  worldModel: WorldModel
 }
 
 // Evidence/verification and coding-agent-workflow rules carried over
 // verbatim in spirit from the platform's Supabase edge function system
 // prompt -- these are the behavioral rules that matter, independent of
 // where the agent loop actually executes.
-function buildSystemPrompt(projectRoot: string): string {
+function buildSystemPrompt(projectRoot: string, ctx: RuntimeContext): string {
+  const perceptionContext = buildPerceptionContext(ctx)
   return `
 You are Yahalla AI, a real local coding agent running entirely on this device -- not a chatbot that talks about code. The project you work on is at: ${projectRoot}
 
@@ -46,9 +51,67 @@ Coding-agent workflow for any request that touches the project:
 1. Analyze the request. 2. Inspect the project for real (list_project_files / read_project_file) before assuming anything. 3. Plan the change. 4. Execute it (write_project_file / patch_project_file) -- old_text must be copied verbatim from a read you just did. 5. Verify by reading the file back or using git_diff. 6. Run the relevant test/build command (run_project_command) when one applies. 7. If it fails, diagnose the real output, fix it, and re-run the same command. Repeat until it passes or you have a concrete, evidence-based reason it cannot. 8. Only then report the outcome, citing what you actually verified.
 
 Git and GitHub: git_status/git_diff are read-only and safe to use freely. git_commit, git_push, and github.write are sensitive and require the user's approval -- the platform enforces this automatically; just call the tool, never ask the user to run commands themselves, and never fabricate a commit hash, repo URL, or push result.
-
+${perceptionContext ? `\n${perceptionContext}\n` : ''}
 Be concise and useful. Respond in the user's language.
 `.trim()
+}
+
+// Folds the World Model into the prompt as weak, explicitly-probabilistic
+// supporting context -- never as a substitute for what the user actually
+// typed/said. This is the concrete "Agent reasons over perception events"
+// integration point: nothing here claims to read emotion or intent, only
+// the same confidence-scored signals the perception layer produced.
+function buildPerceptionContext(ctx: RuntimeContext): string {
+  const snapshot = ctx.worldModel.getSnapshot()
+  if (snapshot.humans.length === 0) return ''
+
+  const lines = snapshot.humans.map((human) => {
+    const parts: string[] = [`state=${human.interactionState}`]
+    if (human.gaze?.target) parts.push(`gaze target="${human.gaze.target}" (confidence ${human.gaze.confidence.toFixed(2)})`)
+    if (human.voice.lastFinal) parts.push(`last speech="${human.voice.lastFinal}"`)
+    return `- person ${human.trackId}: ${parts.join(', ')}`
+  })
+
+  return `Local perception context (probabilistic signals, not facts -- use only as weak supporting context; the user's actual text/voice message always takes precedence):\n${lines.join('\n')}`
+}
+
+function summarizeToolCall(tool: ToolDef, args: Record<string, unknown>): string {
+  switch (tool.key) {
+    case 'read_project_file':
+      return `Reading ${args.path ?? 'a file'}`
+    case 'list_project_files':
+      return `Inspecting ${args.path && args.path !== '.' ? args.path : 'project structure'}`
+    case 'write_project_file':
+      return `Writing ${args.path ?? 'a file'}`
+    case 'patch_project_file':
+      return `Applying correction to ${args.path ?? 'a file'}`
+    case 'git_status':
+      return 'Checking git status'
+    case 'git_diff':
+      return 'Reviewing changes'
+    case 'git_create_branch':
+      return `Creating branch ${args.branch ?? ''}`
+    case 'git_commit':
+      return 'Committing changes'
+    case 'git_push':
+      return 'Pushing to remote'
+    case 'run_project_command':
+      return `Running ${args.command ?? 'command'}`
+    case 'github.read':
+      return 'Checking GitHub repositories'
+    case 'github.write':
+      return 'Creating GitHub repository'
+    default:
+      return `Using ${tool.key}`
+  }
+}
+
+function summarizeToolResult(tool: ToolDef, result: Record<string, unknown>): string {
+  if (tool.key === 'run_project_command') {
+    return result.success ? 'Command completed successfully' : 'Command failed'
+  }
+  if (result.success === false) return `${summarizeToolCall(tool, {})} failed`
+  return `${summarizeToolCall(tool, {})} -- done`
 }
 
 function toolPermissionTarget(tool: ToolDef, projectRoot: string): string {
@@ -111,6 +174,8 @@ async function runLoop(ctx: RuntimeContext, taskId: string, conversationId: stri
   const llmTools = buildOpenAITools()
 
   for (let round = 0; round < maxRounds; round++) {
+    ctx.embodiment.transition('THINKING', round === 0 ? 'Analyzing request' : 'Continuing analysis')
+
     const result = await chatCompletion(ctx.llmBaseUrl, {
       model: ctx.modelKey,
       messages: state.messages,
@@ -118,6 +183,7 @@ async function runLoop(ctx: RuntimeContext, taskId: string, conversationId: stri
     })
 
     if (!result.ok) {
+      ctx.embodiment.transition('ERROR', 'Local LLM request failed')
       db(ctx).prepare("UPDATE tasks SET status='failed', error=?, completed_at=datetime('now') WHERE id=?").run(
         JSON.stringify({ message: result.errorMessage }),
         taskId,
@@ -133,6 +199,7 @@ async function runLoop(ctx: RuntimeContext, taskId: string, conversationId: stri
         message?.content ?? result.data?.choices?.[0]?.text ?? (typeof result.data === 'string' ? result.data : '')
 
       if (!answer) {
+        ctx.embodiment.transition('ERROR', 'No usable answer from the local model')
         db(ctx).prepare("UPDATE tasks SET status='failed', error=?, completed_at=datetime('now') WHERE id=?").run(
           JSON.stringify({ message: 'Local LLM returned no usable answer.' }),
           taskId,
@@ -140,6 +207,7 @@ async function runLoop(ctx: RuntimeContext, taskId: string, conversationId: stri
         return { success: false, conversationId, taskId, status: 'failed', error: 'Local LLM returned no usable answer.' }
       }
 
+      ctx.embodiment.transition('SPEAKING', answer.slice(0, 120))
       saveMessage(ctx.db, conversationId, 'assistant', answer, state.executedTools)
       addMemory(ctx.db, `User: ${state.messages[state.messages.length - 1]?.content ?? ''}\nYahalla: ${answer}`, {
         scope: 'conversation',
@@ -151,6 +219,7 @@ async function runLoop(ctx: RuntimeContext, taskId: string, conversationId: stri
         taskId,
       )
       recordTaskFeedback(ctx.db, taskId, 'success')
+      ctx.embodiment.transition('SUCCESS', 'Task completed')
 
       return { success: true, conversationId, taskId, status: 'completed', answer, executedTools: state.executedTools }
     }
@@ -190,15 +259,19 @@ async function runLoop(ctx: RuntimeContext, taskId: string, conversationId: stri
             JSON.stringify({ ...state, conversationId, pendingToolCallId: call.id, pendingToolName: tool.key }),
           )
         ctx.db.prepare("UPDATE tasks SET status='waiting_approval' WHERE id=?").run(taskId)
+        ctx.embodiment.transition('WAITING', `Waiting for approval: ${summarizeToolCall(tool, args)}`)
         return { success: true, conversationId, taskId, status: 'waiting_approval', approvalId, approvalTool: tool.key }
       }
 
+      ctx.embodiment.transition('ACTING', summarizeToolCall(tool, args))
       const toolResult = await executeToolNow(ctx, tool, args)
+      ctx.embodiment.transition('ACTING', summarizeToolResult(tool, toolResult))
       state.executedTools.push({ tool: tool.key, arguments: args, result: toolResult })
       state.messages.push({ role: 'tool', tool_call_id: call.id, name: tool.key, content: JSON.stringify(toolResult) })
     }
   }
 
+  ctx.embodiment.transition('ERROR', 'Exceeded maximum tool rounds')
   ctx.db.prepare("UPDATE tasks SET status='failed', error=?, completed_at=datetime('now') WHERE id=?").run(
     JSON.stringify({ message: `Exceeded max tool rounds (${maxRounds}) without a final answer.` }),
     taskId,
@@ -228,7 +301,7 @@ export async function runChat(
   )
 
   const history = loadHistory(ctx.db, convId)
-  const messages: ChatMessage[] = [{ role: 'system', content: buildSystemPrompt(ctx.projectRoot) }, ...history]
+  const messages: ChatMessage[] = [{ role: 'system', content: buildSystemPrompt(ctx.projectRoot, ctx) }, ...history]
 
   return runLoop(ctx, taskId, convId, { messages, executedTools: [] })
 }
@@ -258,10 +331,14 @@ export async function resumeApproval(
   const tool = getTool(approval.tool_key)!
   const args = JSON.parse(approval.arguments)
 
+  if (decision === 'approve') {
+    ctx.embodiment.transition('ACTING', summarizeToolCall(tool, args))
+  }
   const toolResult =
     decision === 'approve'
       ? await executeToolNow(ctx, tool, args)
       : { success: false, error: 'Rejected by user.' }
+  ctx.embodiment.transition('ACTING', decision === 'approve' ? summarizeToolResult(tool, toolResult) : 'Action rejected by user')
 
   ctx.db.prepare('UPDATE approvals SET result = ? WHERE id = ?').run(JSON.stringify(toolResult), approvalId)
 

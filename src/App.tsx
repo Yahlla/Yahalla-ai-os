@@ -1080,9 +1080,31 @@ function ChatSection() {
   const [selectedModel, setSelectedModel] = useState('')
   const [showTechnical, setShowTechnical] = useState(false)
   const [lastResult, setLastResult] = useState<ChatResponse | null>(null)
+  const [liveStatus, setLiveStatus] = useState<{ state: string; summary: string | null } | null>(null)
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    // Live "what is Yahalla doing right now" indicator -- concise
+    // action/status summaries only, never raw model reasoning. Silently
+    // no-ops if no local runtime is reachable (e.g. legacy cloud-routed
+    // fallback is active instead).
+    let unsubscribe: (() => void) | undefined
+    localRuntime
+      .subscribeLiveStatus((update) => {
+        if (update.kind === 'embodiment') {
+          setLiveStatus({ state: update.state, summary: update.summary })
+        }
+      })
+      .then((unsub) => {
+        unsubscribe = unsub
+      })
+      .catch(() => {
+        // no local runtime reachable from this window -- nothing to show
+      })
+    return () => unsubscribe?.()
+  }, [])
 
   useEffect(() => {
     api.getAgents().then((a) => setAgents(a.filter((x) => x.status === 'active')))
@@ -1337,7 +1359,7 @@ function ChatSection() {
                     <span />
                     <span />
                     <span />
-                    <em>Processing request…</em>
+                    <em>{liveStatus?.summary || 'Processing request…'}</em>
                   </div>
                 </div>
               </div>

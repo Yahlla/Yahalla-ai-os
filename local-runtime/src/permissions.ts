@@ -8,6 +8,8 @@ export type PermissionScope =
   | 'sensitive_files'
   | 'system_settings'
   | 'application_launching'
+  | 'camera'
+  | 'microphone'
 
 export type AccessLevel = 'none' | 'read' | 'write' | 'execute'
 
