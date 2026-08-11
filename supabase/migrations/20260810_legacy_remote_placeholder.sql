@@ -1,0 +1,2 @@
+-- Legacy remote migration 20260810.
+-- Already applied on the remote database; intentionally empty locally.

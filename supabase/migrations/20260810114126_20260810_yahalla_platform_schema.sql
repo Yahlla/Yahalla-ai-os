@@ -58,11 +58,9 @@ BEGIN
     ALTER TABLE profiles DROP CONSTRAINT profiles_role_check;
   END IF;
 END $$;
-
 ALTER TABLE profiles
   ADD CONSTRAINT profiles_role_check
   CHECK (role IN ('owner','admin','developer','operator','user','viewer'));
-
 DO $$
 BEGIN
   IF EXISTS (
@@ -72,11 +70,11 @@ BEGIN
     ALTER TABLE role_permissions DROP CONSTRAINT role_permissions_role_check;
   END IF;
 END $$;
-
+DELETE FROM role_permissions
+WHERE role NOT IN ('owner','admin','developer','operator','user','viewer');
 ALTER TABLE role_permissions
   ADD CONSTRAINT role_permissions_role_check
   CHECK (role IN ('owner','admin','developer','operator','user','viewer'));
-
 -- =============================================================
 -- 2. Servers table
 -- =============================================================
@@ -97,19 +95,15 @@ CREATE TABLE IF NOT EXISTS servers (
   CONSTRAINT servers_type_check CHECK (type IN ('local','lan','remote','cloud')),
   CONSTRAINT servers_status_check CHECK (status IN ('online','degraded','offline','unknown'))
 );
-
 ALTER TABLE servers ENABLE ROW LEVEL SECURITY;
-
 DROP POLICY IF EXISTS "Admins can read servers" ON servers;
 CREATE POLICY "Admins can read servers" ON servers
   FOR SELECT TO authenticated USING (public.is_admin());
-
 DROP POLICY IF EXISTS "Owners can manage servers" ON servers;
 CREATE POLICY "Owners can manage servers" ON servers
   FOR ALL TO authenticated
   USING (EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'owner'))
   WITH CHECK (EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'owner'));
-
 -- =============================================================
 -- 3. Models table
 -- =============================================================
@@ -141,19 +135,15 @@ CREATE TABLE IF NOT EXISTS models (
   CONSTRAINT models_type_check CHECK (type IN ('general','coding','reasoning','vision','speech','embedding')),
   CONSTRAINT models_status_check CHECK (status IN ('online','offline','unknown','degraded'))
 );
-
 ALTER TABLE models ENABLE ROW LEVEL SECURITY;
-
 DROP POLICY IF EXISTS "Admins can read models" ON models;
 CREATE POLICY "Admins can read models" ON models
   FOR SELECT TO authenticated USING (public.is_admin());
-
 DROP POLICY IF EXISTS "Owners can manage models" ON models;
 CREATE POLICY "Owners can manage models" ON models
   FOR ALL TO authenticated
   USING (EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'owner'))
   WITH CHECK (EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'owner'));
-
 -- =============================================================
 -- 4. Projects table
 -- =============================================================
@@ -169,9 +159,7 @@ CREATE TABLE IF NOT EXISTS projects (
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT projects_status_check CHECK (status IN ('active','archived','suspended'))
 );
-
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-
 DROP POLICY IF EXISTS "Owners can manage projects" ON projects;
 CREATE POLICY "Owners can manage projects" ON projects
   FOR ALL TO authenticated
@@ -183,7 +171,6 @@ CREATE POLICY "Owners can manage projects" ON projects
     owner_id = auth.uid()
     OR public.is_admin()
   );
-
 -- =============================================================
 -- 5. Project members
 -- =============================================================
@@ -196,9 +183,7 @@ CREATE TABLE IF NOT EXISTS project_members (
   PRIMARY KEY (project_id, user_id),
   CONSTRAINT project_members_role_check CHECK (role IN ('owner','member','viewer'))
 );
-
 ALTER TABLE project_members ENABLE ROW LEVEL SECURITY;
-
 DROP POLICY IF EXISTS "Members can read project_members" ON project_members;
 CREATE POLICY "Members can read project_members" ON project_members
   FOR SELECT TO authenticated
@@ -210,7 +195,6 @@ CREATE POLICY "Members can read project_members" ON project_members
       AND (p.owner_id = auth.uid() OR public.is_admin())
     )
   );
-
 DROP POLICY IF EXISTS "Owners can manage project_members" ON project_members;
 CREATE POLICY "Owners can manage project_members" ON project_members
   FOR ALL TO authenticated
@@ -228,7 +212,6 @@ CREATE POLICY "Owners can manage project_members" ON project_members
       AND (p.owner_id = auth.uid() OR public.is_admin())
     )
   );
-
 -- =============================================================
 -- 6. Conversations
 -- =============================================================
@@ -245,30 +228,24 @@ CREATE TABLE IF NOT EXISTS conversations (
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT conversations_status_check CHECK (status IN ('active','archived','deleted'))
 );
-
 ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
-
 DROP POLICY IF EXISTS "Owners can read conversations" ON conversations;
 CREATE POLICY "Owners can read conversations" ON conversations
   FOR SELECT TO authenticated
   USING (owner_id = auth.uid() OR public.is_admin());
-
 DROP POLICY IF EXISTS "Owners can insert conversations" ON conversations;
 CREATE POLICY "Owners can insert conversations" ON conversations
   FOR INSERT TO authenticated
   WITH CHECK (owner_id = auth.uid());
-
 DROP POLICY IF EXISTS "Owners can update conversations" ON conversations;
 CREATE POLICY "Owners can update conversations" ON conversations
   FOR UPDATE TO authenticated
   USING (owner_id = auth.uid() OR public.is_admin())
   WITH CHECK (owner_id = auth.uid() OR public.is_admin());
-
 DROP POLICY IF EXISTS "Owners can delete conversations" ON conversations;
 CREATE POLICY "Owners can delete conversations" ON conversations
   FOR DELETE TO authenticated
   USING (owner_id = auth.uid() OR public.is_admin());
-
 -- =============================================================
 -- 7. Conversation messages
 -- =============================================================
@@ -286,9 +263,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT conversation_messages_role_check CHECK (role IN ('user','assistant','system','tool'))
 );
-
 ALTER TABLE conversation_messages ENABLE ROW LEVEL SECURITY;
-
 DROP POLICY IF EXISTS "Owners can read messages" ON conversation_messages;
 CREATE POLICY "Owners can read messages" ON conversation_messages
   FOR SELECT TO authenticated
@@ -299,7 +274,6 @@ CREATE POLICY "Owners can read messages" ON conversation_messages
       AND (c.owner_id = auth.uid() OR public.is_admin())
     )
   );
-
 DROP POLICY IF EXISTS "Owners can insert messages" ON conversation_messages;
 CREATE POLICY "Owners can insert messages" ON conversation_messages
   FOR INSERT TO authenticated
@@ -310,7 +284,6 @@ CREATE POLICY "Owners can insert messages" ON conversation_messages
       AND (c.owner_id = auth.uid() OR public.is_admin())
     )
   );
-
 DROP POLICY IF EXISTS "Owners can update messages" ON conversation_messages;
 CREATE POLICY "Owners can update messages" ON conversation_messages
   FOR UPDATE TO authenticated
@@ -328,7 +301,6 @@ CREATE POLICY "Owners can update messages" ON conversation_messages
       AND (c.owner_id = auth.uid() OR public.is_admin())
     )
   );
-
 DROP POLICY IF EXISTS "Owners can delete messages" ON conversation_messages;
 CREATE POLICY "Owners can delete messages" ON conversation_messages
   FOR DELETE TO authenticated
@@ -339,7 +311,6 @@ CREATE POLICY "Owners can delete messages" ON conversation_messages
       AND (c.owner_id = auth.uid() OR public.is_admin())
     )
   );
-
 -- =============================================================
 -- 8. Extend tasks table
 -- =============================================================
@@ -353,7 +324,6 @@ BEGIN
     ALTER TABLE tasks ADD COLUMN parent_task_id uuid REFERENCES tasks(id) ON DELETE SET NULL;
   END IF;
 END $$;
-
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -363,7 +333,6 @@ BEGIN
     ALTER TABLE tasks ADD COLUMN retry_count integer NOT NULL DEFAULT 0;
   END IF;
 END $$;
-
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -373,7 +342,6 @@ BEGIN
     ALTER TABLE tasks ADD COLUMN current_step text;
   END IF;
 END $$;
-
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -383,7 +351,6 @@ BEGIN
     ALTER TABLE tasks ADD COLUMN progress integer NOT NULL DEFAULT 0;
   END IF;
 END $$;
-
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -393,7 +360,6 @@ BEGIN
     ALTER TABLE tasks ADD COLUMN project_id uuid REFERENCES projects(id) ON DELETE SET NULL;
   END IF;
 END $$;
-
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -403,7 +369,6 @@ BEGIN
     ALTER TABLE tasks ADD COLUMN conversation_id uuid REFERENCES conversations(id) ON DELETE SET NULL;
   END IF;
 END $$;
-
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -413,7 +378,6 @@ BEGIN
     ALTER TABLE tasks ADD COLUMN model_id uuid REFERENCES models(id) ON DELETE SET NULL;
   END IF;
 END $$;
-
 -- =============================================================
 -- 9. Extend agents table with model preference + server assignment
 -- =============================================================
@@ -427,7 +391,6 @@ BEGIN
     ALTER TABLE agents ADD COLUMN model_id uuid REFERENCES models(id) ON DELETE SET NULL;
   END IF;
 END $$;
-
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -437,7 +400,6 @@ BEGIN
     ALTER TABLE agents ADD COLUMN fallback_model_id uuid REFERENCES models(id) ON DELETE SET NULL;
   END IF;
 END $$;
-
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -447,7 +409,6 @@ BEGIN
     ALTER TABLE agents ADD COLUMN server_id uuid REFERENCES servers(id) ON DELETE SET NULL;
   END IF;
 END $$;
-
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -457,7 +418,6 @@ BEGIN
     ALTER TABLE agents ADD COLUMN role text NOT NULL DEFAULT 'general';
   END IF;
 END $$;
-
 -- =============================================================
 -- 10. Indexes
 -- =============================================================
@@ -475,7 +435,6 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_conversation ON tasks(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_agents_server ON agents(server_id);
 CREATE INDEX IF NOT EXISTS idx_agents_model ON agents(model_id);
-
 -- =============================================================
 -- 11. Grants
 -- =============================================================

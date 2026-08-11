@@ -3,27 +3,23 @@ CREATE POLICY "Users can insert their own profile"
   ON profiles FOR INSERT
   TO authenticated
   WITH CHECK (auth.uid() = id);
-
 -- Allow users to update their own profile
 CREATE POLICY "Users can update their own profile"
   ON profiles FOR UPDATE
   TO authenticated
   USING (auth.uid() = id)
   WITH CHECK (auth.uid() = id);
-
 -- Allow admins to update any profile (for role management)
 CREATE POLICY "Admins can update any profile"
   ON profiles FOR UPDATE
   TO authenticated
   USING (is_admin())
   WITH CHECK (true);
-
 -- Allow admins to read any profile
 CREATE POLICY "Admins can read all profiles"
   ON profiles FOR SELECT
   TO authenticated
   USING (is_admin());
-
 -- Function to auto-create a profile when a new user signs up
 -- The first user ever to sign up becomes the owner; all others get 'user'
 CREATE OR REPLACE FUNCTION public.handle_new_user()
@@ -47,7 +43,6 @@ BEGIN
   RETURN NEW;
 END;
 $function$;
-
 -- Trigger: fires after a new user is created in auth.users
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users

@@ -43,7 +43,6 @@ INSERT INTO permissions (key, name_ar, name_de, description) VALUES
   ('admin', 'إدارة', 'Administration', 'Admin control center'),
   ('approvals', 'موافقات', 'Genehmigungen', 'Approve or reject dangerous actions')
 ON CONFLICT (key) DO NOTHING;
-
 -- =============================================================
 -- 2. Role-permission mappings
 -- =============================================================
@@ -105,7 +104,6 @@ BEGIN
     END IF;
   END LOOP;
 END $$;
-
 -- =============================================================
 -- 3. Local server
 -- =============================================================
@@ -121,7 +119,6 @@ VALUES (
   '{"agent_runtime": true, "llm": true, "tools": true, "file_access": true}'::jsonb
 )
 ON CONFLICT DO NOTHING;
-
 -- =============================================================
 -- 4. Models (status='unknown' until real runtime confirms)
 -- =============================================================
@@ -142,7 +139,6 @@ BEGIN
     ON CONFLICT DO NOTHING;
   END IF;
 END $$;
-
 -- =============================================================
 -- 5. Agents
 -- =============================================================
@@ -176,7 +172,6 @@ BEGIN
     ('docs', 'التوثيق', 'Documentation Agent', 'Generates and updates documentation.', 'active', 'docs', local_server, general_model, NULL, '{}'::jsonb)
   ON CONFLICT (key) DO NOTHING;
 END $$;
-
 -- =============================================================
 -- 6. Tools
 -- =============================================================
@@ -196,7 +191,6 @@ VALUES
   ('email.send', 'إرسال بريد', 'E-Mail senden', 'Send an email to a recipient.', 'email', 'active', true, '{}'::jsonb),
   ('yahalla.api', 'API يحalla', 'Yahalla API', 'Perform an authorized Yahalla API operation.', 'yahalla', 'active', true, '{}'::jsonb)
 ON CONFLICT (key) DO NOTHING;
-
 -- =============================================================
 -- 7. Agent-tool mappings
 -- =============================================================
@@ -308,7 +302,6 @@ BEGIN
   INSERT INTO agent_tools (agent_id, tool_id, enabled) VALUES (docs_id, t_write, true) ON CONFLICT DO NOTHING;
   INSERT INTO agent_tools (agent_id, tool_id, enabled) VALUES (docs_id, t_patch, true) ON CONFLICT DO NOTHING;
 END $$;
-
 -- =============================================================
 -- 8. Agent-permission mappings
 -- =============================================================
