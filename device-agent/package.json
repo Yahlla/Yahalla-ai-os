@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.112.2"
+    "@supabase/supabase-js": "^2.112.2",
+    "@yahalla/agent-tools": "file:../packages/agent-tools"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

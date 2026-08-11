@@ -5,6 +5,7 @@ import './App.css'
 import { supabase } from './lib/supabase'
 import { signIn, signOut, signUp } from './lib/auth'
 import * as api from './lib/api'
+import * as localRuntime from './lib/localRuntime'
 import type {
   Agent,
   Approval,
@@ -1115,12 +1116,20 @@ function ChatSection() {
     setSending(true)
 
     try {
-      const result = await api.sendChatMessage({
-        message,
-        conversation_id: conversationId ?? undefined,
-        agent_key: selectedAgent,
-        model_id: selectedModel || undefined,
-      })
+      // AI inference is local-first: talk to the Agent Runtime on this
+      // device. Only if it isn't reachable at all do we fall back to the
+      // legacy Supabase-routed path, so an existing dev setup (or a
+      // deployment that intentionally still points at a hosted model via
+      // servers/models) keeps working rather than breaking outright.
+      const runtimeUp = await localRuntime.checkRuntimeHealth()
+      const result = runtimeUp
+        ? await localRuntime.sendChatMessage({ message, conversation_id: conversationId ?? undefined })
+        : await api.sendChatMessage({
+            message,
+            conversation_id: conversationId ?? undefined,
+            agent_key: selectedAgent,
+            model_id: selectedModel || undefined,
+          })
 
       setLastResult(result)
 

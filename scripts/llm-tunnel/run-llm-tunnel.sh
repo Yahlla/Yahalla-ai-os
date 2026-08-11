@@ -1,4 +1,11 @@
 #!/bin/sh
+# LEGACY / OPTIONAL: part of the old cloud-routed path. Normal operation
+# does not need a tunnel at all -- see local-runtime/ and
+# scripts/setup-local.sh for the local-first architecture, where the
+# Control Center on each device talks directly to an Agent Runtime on that
+# same device. Only relevant if you deliberately want a shared/hosted
+# model reachable from the domain in addition to local-first.
+#
 # Persistent watcher: keeps a Cloudflare quick tunnel open to the local LLM
 # server (127.0.0.1:8080 by default) and republishes YAHALLA_LLM_URL to
 # Supabase whenever the tunnel's public URL changes (a fresh URL is

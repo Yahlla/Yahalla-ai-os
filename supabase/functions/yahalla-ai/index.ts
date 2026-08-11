@@ -2137,7 +2137,15 @@ Deno.serve(async (req) => {
         updated_at: new Date().toISOString(),
       }).eq('id', task.id)
 
-      const errorMsg = 'No AI model is currently online. The platform requires at least one enabled model with status "online" (or set YAHALLA_LLM_URL). Start a local LLM server and update the model status in the admin control center.'
+      // NOTE: this path (Supabase routing a chat request to a shared model
+      // via servers/models or YAHALLA_LLM_URL) is the legacy/optional
+      // cloud-routing path, not how Yahalla AI is meant to run normally.
+      // The primary architecture is local-first: the Control Center talks
+      // directly to a local Agent Runtime on the user's own device
+      // (see local-runtime/), which is never reachable through this Edge
+      // Function at all. This branch only still matters for someone who
+      // deliberately configured a shared/hosted model here.
+      const errorMsg = 'No AI model is currently online for the optional cloud-routed path. Yahalla AI normally runs the AI locally on your own device (see local-runtime/) and does not need this at all -- this error only matters if you specifically configured a shared model via servers/models or YAHALLA_LLM_URL.'
 
       await admin.from('conversation_messages').insert({
         conversation_id: conversationId,

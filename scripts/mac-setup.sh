@@ -1,4 +1,13 @@
 #!/bin/sh
+# LEGACY / OPTIONAL: this sets up the old cloud-routed path (Supabase Edge
+# Function -> a shared model reachable via servers/models or
+# YAHALLA_LLM_URL, exposed through this Mac's Cloudflare tunnel). Normal
+# operation no longer needs any of this -- see scripts/setup-local.sh for
+# the local-first architecture, where the AI runs entirely on each user's
+# own device with no tunnel and no dependency on this machine. Only run
+# this script if you deliberately want a shared/hosted-model fallback in
+# addition to local-first.
+#
 # One-time setup for Yahalla AI OS: deploys the unified branch to your real
 # Supabase project, pairs this Mac as a Device Agent, and installs autostart
 # so no Terminal is needed afterwards. Safe to re-run (idempotent).

@@ -1,0 +1,23 @@
+{
+  "name": "@yahalla/agent-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared, sandboxed project tool executors (files/git/run_command) used by both the legacy paired Device Agent and the local-first Agent Runtime.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "~6.0.2"
+  }
+}

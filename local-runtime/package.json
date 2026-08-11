@@ -1,0 +1,26 @@
+{
+  "name": "@yahalla/local-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Yahalla AI local-first Agent Runtime: runs entirely on the user's own device. Owns the local LLM process, tool execution, memory/knowledge/skills, permissions, and tasks. No cloud LLM, no tunnel, no dependency on any other machine.",
+  "type": "module",
+  "bin": {
+    "yahalla-runtime": "./dist/src/index.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/test/integration.test.js dist/test/repair-loop.test.js"
+  },
+  "dependencies": {
+    "@yahalla/agent-tools": "file:../packages/agent-tools"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "~6.0.2"
+  }
+}
