@@ -1097,17 +1097,32 @@ function HealthSection() {
   const [servers, setServers] = useState<ServerType[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [loading, setLoading] = useState(true)
+  const [pinging, setPinging] = useState<string | null>(null)
+
+  function load() {
+    return Promise.all([api.getServers(), api.getModels()]).then(([s, m]) => {
+      setServers(s)
+      setModels(m)
+    })
+  }
 
   useEffect(() => {
-    Promise.all([api.getServers(), api.getModels()])
-      .then(([s, m]) => {
-        setServers(s)
-        setModels(m)
-      })
-      .finally(() => setLoading(false))
+    load().finally(() => setLoading(false))
   }, [])
 
+  async function pingControlPlane(server: ServerType) {
+    setPinging(server.id)
+    try {
+      await api.refreshServerHealth(server)
+      await load()
+    } finally {
+      setPinging(null)
+    }
+  }
+
   if (loading) return <div className="loading-text">Loading health data…</div>
+
+  const controlPlanes = servers.filter((s) => s.capabilities?.self_hosted === true)
 
   return (
     <div className="admin-section">
@@ -1115,6 +1130,27 @@ function HealthSection() {
         <h2>Health</h2>
         <p>Runtime and infrastructure health</p>
       </div>
+
+      {controlPlanes.length > 0 && (
+        <div className="health-group">
+          <h3>Self-hosted control plane</h3>
+          {controlPlanes.map((server) => (
+            <div key={server.id} className="health-row">
+              <Activity size={16} />
+              <span className="health-label">{server.name}</span>
+              <span className="health-host">{server.hostname}</span>
+              <StatusBadge status={server.status} />
+              <button
+                className="mini-button"
+                disabled={pinging === server.id}
+                onClick={() => pingControlPlane(server)}
+              >
+                {pinging === server.id ? 'Pinging…' : 'Ping now'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="health-group">
         <h3>Servers</h3>

@@ -47,6 +47,13 @@ services:
       DATABASE_URL: postgresql://yahalla:${POSTGRES_PASSWORD}@postgres:5432/yahalla
       SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:?SUPABASE_JWT_SECRET must be set in .env}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      # The actual worker-concurrency cap: every request needs a pool
+      # connection, so this bounds how much concurrent DB work platform-api
+      # can drive regardless of how many requests Caddy lets through.
+      # Tune to whatever headroom the real VPS's Postgres has (start
+      # conservative on Paket M-class hardware; raise it once you've
+      # measured, not guessed).
+      DB_POOL_MAX: ${PLATFORM_API_DB_POOL_MAX:-8}
     mem_limit: 256m
     cpus: 0.5
 
@@ -74,7 +81,7 @@ services:
     cpus: 0.25
 
   caddy:
-    image: caddy:2-alpine
+    build: ./caddy
     restart: unless-stopped
     ports:
       - "80:80"

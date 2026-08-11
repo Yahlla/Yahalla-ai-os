@@ -19,9 +19,23 @@ their own device (browser WebGPU or the Electron/local-runtime app). See
   `docker compose up` against the live stack. Polls for admin-approved
   `deployment_proposals` rows and deploys exactly that ref -- no arbitrary
   command execution.
-- `docker-compose.yml` + `Caddyfile` -- the whole stack: Postgres,
-  platform-api, deploy-agent, and Caddy (the only exposed port, automatic
-  TLS). Every service has an explicit `mem_limit`/`cpus`.
+- `docker-compose.yml` + `Caddyfile` + `caddy/` -- the whole stack:
+  Postgres, platform-api, deploy-agent, and Caddy (the only exposed port,
+  automatic TLS, per-IP rate limiting via a custom build with
+  `caddy-ratelimit`). Every service has an explicit `mem_limit`/`cpus`.
+
+## Load protection
+
+Two independent layers, neither trusting the other to be enough alone:
+
+- **Caddy** (`Caddyfile`) rate-limits per source IP (120 req/min by
+  default) before a request ever reaches platform-api.
+- **platform-api**'s own Postgres connection pool (`DB_POOL_MAX`, set in
+  `docker-compose.yml`, default 8) is the real worker-concurrency cap --
+  every request needs a pool connection, so this bounds how much
+  concurrent DB work the service can drive no matter how many requests get
+  past Caddy. Start conservative on a Paket M-class VPS and raise it only
+  after watching real headroom, not by guessing.
 
 ## First-time setup
 
