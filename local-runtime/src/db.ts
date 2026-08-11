@@ -66,9 +66,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   output TEXT,
   error TEXT,
   conversation_id TEXT,
+  parent_task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+  plan_order INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id);
 
 CREATE TABLE IF NOT EXISTS task_feedback (
   id TEXT PRIMARY KEY,

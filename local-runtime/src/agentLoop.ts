@@ -283,11 +283,68 @@ function db(ctx: RuntimeContext): Db {
   return ctx.db
 }
 
+// A short, dedicated call (no tools) that asks the model to break a large
+// or vague goal into concrete ordered steps before the main tool-calling
+// loop starts -- the same "1. Analyze 2. Inspect 3. Plan..." workflow the
+// system prompt already asks for, made explicit and persisted instead of
+// left implicit in the model's head. Failure here (unparseable response,
+// LLM error) is never fatal to the chat itself: it just means no plan was
+// recorded, and runChat falls back to the loop's existing behavior.
+const PLANNING_SYSTEM_PROMPT = `You are a planning assistant. Break the user's goal into 2 to 8 concrete, ordered, actionable subtasks. Respond with ONLY a JSON array of short subtask title strings -- no prose, no markdown, nothing else. Example: ["Set up the database schema", "Build the API endpoints", "Wire the frontend", "Test end to end"]`
+
+export function parsePlanResponse(content: string): string[] | null {
+  // Models sometimes wrap JSON in a fenced code block despite being told
+  // not to -- strip that before parsing rather than rejecting outright.
+  const cleaned = content
+    .trim()
+    .replace(/^```(?:json)?\n?/, '')
+    .replace(/```$/, '')
+    .trim()
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(cleaned)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(parsed)) return null
+
+  const subtasks = parsed.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((s) => s.trim())
+  if (subtasks.length < 2 || subtasks.length > 10) return null
+  return subtasks
+}
+
+// Only worth the extra LLM round-trip for a substantial, first-in-
+// conversation request -- a short follow-up ("what does that mean?") or a
+// message deep into an existing conversation doesn't need a fresh plan.
+export function shouldPlan(message: string, isFirstMessageInConversation: boolean): boolean {
+  return isFirstMessageInConversation && message.trim().length >= 80
+}
+
+export async function generatePlan(ctx: RuntimeContext, goal: string): Promise<string[] | null> {
+  const result = await chatCompletion(ctx.llmBaseUrl, {
+    model: ctx.modelKey,
+    messages: [
+      { role: 'system', content: PLANNING_SYSTEM_PROMPT },
+      { role: 'user', content: goal },
+    ],
+  })
+  if (!result.ok) return null
+  const content = result.data?.choices?.[0]?.message?.content
+  if (typeof content !== 'string') return null
+  return parsePlanResponse(content)
+}
+
 export async function runChat(
   ctx: RuntimeContext,
   message: string,
   conversationId?: string,
 ): Promise<ChatResult> {
+  // Checked before saveMessage inserts the current message, so it
+  // reflects whether a conversation existed *before* this request --
+  // loadHistory after saving would always see at least this one message.
+  const isFirstMessage = !conversationId || loadHistory(ctx.db, conversationId, 1).length === 0
+
   const convId = getOrCreateConversation(ctx.db, conversationId, message)
   saveMessage(ctx.db, convId, 'user', message)
 
@@ -300,10 +357,38 @@ export async function runChat(
     convId,
   )
 
-  const history = loadHistory(ctx.db, convId)
-  const messages: ChatMessage[] = [{ role: 'system', content: buildSystemPrompt(ctx.projectRoot, ctx) }, ...history]
+  let planContext = ''
+  if (shouldPlan(message, isFirstMessage)) {
+    ctx.embodiment.transition('THINKING', 'Breaking the goal into steps')
+    const plan = await generatePlan(ctx, message)
+    if (plan) {
+      const insertSubtask = ctx.db.prepare(
+        'INSERT INTO tasks (id, title, status, input, conversation_id, parent_task_id, plan_order) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      )
+      plan.forEach((title, index) => {
+        insertSubtask.run(newId(), title, 'pending', JSON.stringify({}), convId, taskId, index)
+      })
+      planContext = `\n\nYou already broke this goal into ${plan.length} steps:\n${plan.map((title, i) => `${i + 1}. ${title}`).join('\n')}\nWork through them in order using the available tools, treating each as a checkpoint before moving to the next. Do not silently skip a step.`
+    }
+  }
 
-  return runLoop(ctx, taskId, convId, { messages, executedTools: [] })
+  const history = loadHistory(ctx.db, convId)
+  const messages: ChatMessage[] = [{ role: 'system', content: buildSystemPrompt(ctx.projectRoot, ctx) + planContext }, ...history]
+
+  const chatResult = await runLoop(ctx, taskId, convId, { messages, executedTools: [] })
+
+  // Honest bookkeeping, not fine-grained per-subtask tracking the loop
+  // doesn't actually do: once the parent task the plan belongs to
+  // succeeds, its still-pending subtasks are marked completed too --
+  // there is no separate signal for "step 3 of 5 done" mid-loop, only
+  // "the whole goal succeeded" or it didn't.
+  if (chatResult.status === 'completed') {
+    ctx.db
+      .prepare("UPDATE tasks SET status='completed', completed_at=datetime('now') WHERE parent_task_id = ? AND status = 'pending'")
+      .run(taskId)
+  }
+
+  return chatResult
 }
 
 export async function resumeApproval(
