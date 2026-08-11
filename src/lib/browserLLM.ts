@@ -23,9 +23,6 @@ function isLikelyPhone(): boolean {
   return /iphone|ipad|android|mobile/i.test(navigator.userAgent)
 }
 
-let enginePromise: Promise<import('@mlc-ai/web-llm').MLCEngine> | null = null
-let loadedModelId: string | null = null
-
 async function pickModelId(): Promise<string> {
   const webllm = await import('@mlc-ai/web-llm')
   const candidates = webllm.prebuiltAppConfig.model_list
@@ -50,42 +47,63 @@ async function pickModelId(): Promise<string> {
   return picked.model_id
 }
 
+// Assigned synchronously, before any `await` inside the load sequence
+// below runs -- this is what makes a second loadBrowserModel() call that
+// arrives while the first is still in its early async steps (the dynamic
+// import, picking a model) join the *same* in-flight load instead of
+// starting a brand new one. The previous version set its "is it loading"
+// flag only after two awaits, leaving a window where two overlapping
+// calls (a fast retry after an interrupted request, e.g.) could each
+// kick off their own full model download at once -- exactly the "every
+// single message re-downloads the model" symptom this fixes.
+let loadingPromise: Promise<import('@mlc-ai/web-llm').MLCEngine> | null = null
+let resolvedModelId: string | null = null
+
 export async function loadBrowserModel(onProgress?: (p: BrowserLLMProgress) => void): Promise<string> {
-  if (enginePromise && loadedModelId) return loadedModelId
-
-  const webllm = await import('@mlc-ai/web-llm')
-  const modelId = await pickModelId()
-  loadedModelId = modelId
-
-  enginePromise = webllm.CreateMLCEngine(modelId, {
-    initProgressCallback: (report) => onProgress?.({ progress: report.progress, text: report.text }),
-  })
-  await enginePromise
-  return modelId
+  if (!loadingPromise) {
+    loadingPromise = (async () => {
+      const webllm = await import('@mlc-ai/web-llm')
+      const modelId = await pickModelId()
+      const engine = await webllm.CreateMLCEngine(modelId, {
+        initProgressCallback: (report) => onProgress?.({ progress: report.progress, text: report.text }),
+      })
+      resolvedModelId = modelId
+      return engine
+    })().catch((error: unknown) => {
+      // A failed/interrupted load must not get stuck forever -- the next
+      // call has to be a real retry, not an immediate re-throw of the
+      // same stale rejection every time.
+      loadingPromise = null
+      resolvedModelId = null
+      throw error
+    })
+  }
+  await loadingPromise
+  return resolvedModelId!
 }
 
 export function isBrowserModelLoaded(): boolean {
-  return enginePromise !== null
+  return loadingPromise !== null
 }
 
 export function getLoadedModelId(): string | null {
-  return loadedModelId
+  return resolvedModelId
 }
 
 export type BrowserChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
 
 export async function browserChatCompletion(messages: BrowserChatMessage[]): Promise<string> {
-  if (!enginePromise) throw new Error('Local browser model is not loaded yet. Call loadBrowserModel() first.')
-  const engine = await enginePromise
+  if (!loadingPromise) throw new Error('Local browser model is not loaded yet. Call loadBrowserModel() first.')
+  const engine = await loadingPromise
   const completion = await engine.chat.completions.create({ messages, stream: false })
   return completion.choices[0]?.message?.content ?? ''
 }
 
 export async function unloadBrowserModel(): Promise<void> {
-  if (enginePromise) {
-    const engine = await enginePromise
-    await engine.unload()
+  if (loadingPromise) {
+    const engine = await loadingPromise.catch(() => null)
+    if (engine) await engine.unload()
   }
-  enginePromise = null
-  loadedModelId = null
+  loadingPromise = null
+  resolvedModelId = null
 }
