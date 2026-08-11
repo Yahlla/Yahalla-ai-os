@@ -67,6 +67,21 @@ export async function exchangePairingCode(
   })
 }
 
+// A human's Supabase-issued JWT verifies against SUPABASE_JWT_SECRET alone
+// -- it never touches this self-hosted database. Without this, the first
+// request from a brand-new human would authenticate fine but own no
+// auth.users/profiles row here, so every RLS-scoped query (tasks, devices,
+// deployment_proposals) would silently see nothing. Mirrors exactly how
+// Supabase's own auth.users table gets a row on first sign-in.
+export async function ensureHumanUser(userId: string, email?: string): Promise<void> {
+  await withServiceRole((client) =>
+    client.query('INSERT INTO auth.users (id, email) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING', [
+      userId,
+      email ?? null,
+    ]),
+  )
+}
+
 export type AuthenticatedDevice = { deviceId: string; authUserId: string; ownerId: string }
 
 export async function authenticateDevice(token: string): Promise<AuthenticatedDevice | null> {

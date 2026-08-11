@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { getPool, withUserSession } from './db.js'
 import { verifyJwt } from './jwt.js'
-import { authenticateDevice, createPairingCode, exchangePairingCode, recordHeartbeat } from './pairing.js'
+import { authenticateDevice, createPairingCode, ensureHumanUser, exchangePairingCode, recordHeartbeat } from './pairing.js'
 
 export type PlatformConfig = {
   port: number
@@ -50,6 +50,7 @@ async function resolveIdentity(req: IncomingMessage, config: PlatformConfig): Pr
   if (token.split('.').length === 3) {
     try {
       const claims = verifyJwt(token, config.supabaseJwtSecret)
+      await ensureHumanUser(claims.sub, typeof claims.email === 'string' ? claims.email : undefined)
       return { userId: claims.sub, kind: 'human' }
     } catch {
       return null

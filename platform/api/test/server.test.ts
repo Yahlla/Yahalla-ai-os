@@ -193,3 +193,15 @@ test('the same proposal cannot be decided twice', async () => {
   assert.equal(status, 409)
   assert.ok(body.error)
 })
+
+test('a brand-new human (no pre-existing auth.users row) is auto-provisioned on first request', async () => {
+  const freshUserId = randomUUID()
+  const freshJwt = signTestJwt(freshUserId)
+
+  const { status, body } = await api('/tasks', {}, freshJwt)
+  assert.equal(status, 200)
+  assert.ok(Array.isArray(body.tasks))
+
+  const { rows } = await getPool().query('SELECT id FROM auth.users WHERE id = $1', [freshUserId])
+  assert.equal(rows.length, 1)
+})
