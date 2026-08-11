@@ -30,11 +30,15 @@ async function pickModelId(): Promise<string> {
   const webllm = await import('@mlc-ai/web-llm')
   const candidates = webllm.prebuiltAppConfig.model_list
     .filter((m) => m.model_id.includes('Instruct') && typeof m.vram_required_MB === 'number')
-    .sort((a, b) => (a.vram_required_MB ?? Infinity) - (b.vram_required_MB ?? Infinity))
+    // Largest-first: within whatever this device can handle, prefer the
+    // most capable model that still fits, not the smallest one available
+    // -- a tiny model answers fast but guesses/hallucinates far more, and
+    // "advanced" was the explicit requirement, not just "responds".
+    .sort((a, b) => (b.vram_required_MB ?? 0) - (a.vram_required_MB ?? 0))
 
   const ceilingMB = isLikelyPhone() ? 2500 : 4500
   const withinBudget = candidates.filter((m) => (m.vram_required_MB ?? 0) <= ceilingMB)
-  const picked = withinBudget[0] ?? candidates[0]
+  const picked = withinBudget[0] ?? candidates[candidates.length - 1]
   if (!picked) throw new Error('No compatible local model found in the WebLLM catalog.')
   return picked.model_id
 }
