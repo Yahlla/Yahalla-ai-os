@@ -1302,7 +1302,22 @@ type ChatMessage = {
   agent?: string
   toolActivity?: { tool: string; result: Record<string, unknown> }[]
   error?: boolean
+  attachments?: { name: string; size: number }[]
 }
+
+type AttachedFile = { name: string; content: string; size: number }
+
+const MAX_ATTACHMENT_BYTES = 200_000
+// Read as plain text and included as context -- no vision model is wired
+// up (see the camera-capture feature), so an actual image attachment
+// can't be "seen" by any tier yet. Extension allowlist, not MIME
+// sniffing: browsers report inconsistent/missing MIME types for code
+// files, and this list is honest about exactly what gets read as text.
+const TEXT_ATTACHMENT_EXTENSIONS = new Set([
+  'txt', 'md', 'markdown', 'json', 'js', 'jsx', 'ts', 'tsx', 'py', 'css', 'html', 'htm',
+  'csv', 'log', 'yaml', 'yml', 'xml', 'sh', 'sql', 'toml', 'ini', 'env', 'c', 'h', 'cpp',
+  'java', 'go', 'rs', 'rb', 'php',
+])
 
 // =============================================================
 // Artifacts (side panel for HTML/code/documents/charts, separate from
@@ -1492,6 +1507,9 @@ function ChatSection() {
     },
   ])
   const [input, setInput] = useState('')
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
+  const [attachmentError, setAttachmentError] = useState('')
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [sending, setSending] = useState(false)
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
   const [error, setError] = useState('')
@@ -1696,12 +1714,62 @@ function ChatSection() {
     textareaRef.current?.focus()
   }, [])
 
+  function extensionOf(filename: string): string {
+    const dot = filename.lastIndexOf('.')
+    return dot === -1 ? '' : filename.slice(dot + 1).toLowerCase()
+  }
+
+  async function handleFileSelect(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0) return
+    setAttachmentError('')
+    const files = Array.from(fileList)
+    const accepted: AttachedFile[] = []
+    const problems: string[] = []
+
+    for (const file of files) {
+      if (!TEXT_ATTACHMENT_EXTENSIONS.has(extensionOf(file.name))) {
+        problems.push(`${file.name}: نوع الملف غير مدعوم بعد -- يمكن قراءة ملفات نصية/كود فقط (لا يوجد نموذج رؤية متصل حالياً لفهم الصور).`)
+        continue
+      }
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        problems.push(`${file.name}: أكبر من ${Math.round(MAX_ATTACHMENT_BYTES / 1000)}كB -- قصّه أو قسّمه أولاً.`)
+        continue
+      }
+      try {
+        const content = await file.text()
+        accepted.push({ name: file.name, content, size: file.size })
+      } catch {
+        problems.push(`${file.name}: تعذّرت قراءته كملف نصي.`)
+      }
+    }
+
+    if (accepted.length > 0) setAttachedFiles((prev) => [...prev, ...accepted])
+    if (problems.length > 0) setAttachmentError(problems.join(' '))
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  function removeAttachment(name: string) {
+    setAttachedFiles((prev) => prev.filter((f) => f.name !== name))
+  }
+
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault()
-    const message = input.trim()
-    if (!message || sending) return
+    const typed = input.trim()
+    if ((!typed && attachedFiles.length === 0) || sending) return
+
+    // Attached files are read client-side (never uploaded anywhere on
+    // their own) and folded into the same text sent to whichever tier
+    // answers -- there is no separate "file" concept the runtimes
+    // understand, just more context in the message.
+    const fileContext = attachedFiles
+      .map((f) => `\n\n--- attached file: ${f.name} ---\n\`\`\`\n${f.content}\n\`\`\``)
+      .join('')
+    const message = (typed || `(${attachedFiles.length} file(s) attached, no message)`) + fileContext
+    const attachmentsForDisplay = attachedFiles.map((f) => ({ name: f.name, size: f.size }))
 
     setInput('')
+    setAttachedFiles([])
+    setAttachmentError('')
     setError('')
 
     const userMessage: ChatMessage = {
@@ -1709,6 +1777,7 @@ function ChatSection() {
       role: 'user',
       content: message,
       createdAt: new Date(),
+      attachments: attachmentsForDisplay.length > 0 ? attachmentsForDisplay : undefined,
     }
 
     setMessages((prev) => [...prev, userMessage])
@@ -2010,6 +2079,16 @@ function ChatSection() {
                       })}
                     </span>
                   </div>
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="attachment-chips">
+                      {message.attachments.map((f) => (
+                        <span key={f.name} className="attachment-chip static">
+                          <FileText size={12} />
+                          {f.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <div className={`message-bubble ${message.error ? 'message-error' : ''} ${message.id === streamingMessageId ? 'streaming' : ''}`}>
                     {message.content}
                   </div>
@@ -2094,8 +2173,31 @@ function ChatSection() {
             </details>
           )}
 
+          {attachmentError && <div className="composer-error">{attachmentError}</div>}
+
+          {attachedFiles.length > 0 && (
+            <div className="attachment-chips">
+              {attachedFiles.map((f) => (
+                <span key={f.name} className="attachment-chip">
+                  <FileText size={12} />
+                  {f.name}
+                  <button type="button" onClick={() => removeAttachment(f.name)} title="Remove">
+                    <X size={11} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
           <form className="composer" onSubmit={sendMessage}>
-            <button type="button" className="composer-icon">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => handleFileSelect(e.target.files)}
+            />
+            <button type="button" className="composer-icon" onClick={() => fileInputRef.current?.click()} title="Attach a text/code file">
               <Paperclip size={18} />
             </button>
             <textarea
