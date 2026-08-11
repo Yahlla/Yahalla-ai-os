@@ -151,6 +151,60 @@ export function createPlatformServer(config: PlatformConfig) {
         return send(res, 200, { success: true, status: decision })
       }
 
+      // Self-evolving agents propose a code change here (diff + git_ref);
+      // it never ships on its own. RLS (is_admin(), see the
+      // deployment_proposals migration) is the only enforcement of who may
+      // see or decide these -- this route does not re-check admin status
+      // itself, same division of responsibility as /approvals above.
+      if (path === '/deployments' && req.method === 'GET') {
+        const rows = await withUserSession(identity.userId, (client) =>
+          client.query('SELECT * FROM deployment_proposals ORDER BY created_at DESC LIMIT 50'),
+        )
+        return send(res, 200, { deployments: rows.rows })
+      }
+
+      if (path === '/deployments' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const title = String(body.title ?? '')
+        const gitRef = String(body.git_ref ?? '')
+        const diff = String(body.diff ?? '')
+        if (!title || !gitRef || !diff) {
+          return send(res, 400, { success: false, error: 'title, git_ref, and diff are required.' })
+        }
+        const created = await withUserSession(identity.userId, (client) =>
+          client.query(
+            `INSERT INTO deployment_proposals (title, description, git_ref, base_ref, diff, proposed_by, proposed_by_agent)
+             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+            [
+              title,
+              typeof body.description === 'string' ? body.description : null,
+              gitRef,
+              typeof body.base_ref === 'string' ? body.base_ref : 'main',
+              diff,
+              identity.userId,
+              typeof body.proposed_by_agent === 'string' ? body.proposed_by_agent : null,
+            ],
+          ),
+        )
+        return send(res, 200, { success: true, deployment: created.rows[0] })
+      }
+
+      const deploymentMatch = path.match(/^\/deployments\/([^/]+)\/decide$/)
+      if (deploymentMatch && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const decision = body.decision === 'reject' ? 'rejected' : 'approved'
+        const changed = await withUserSession(identity.userId, (client) =>
+          client.query(
+            "UPDATE deployment_proposals SET status = $1, decided_by = $2, decided_at = now() WHERE id = $3 AND status = 'pending' RETURNING id",
+            [decision, identity.userId, deploymentMatch[1]],
+          ),
+        )
+        if (changed.rowCount === 0) {
+          return send(res, 409, { success: false, error: 'Deployment proposal was already decided or does not exist.' })
+        }
+        return send(res, 200, { success: true, status: decision })
+      }
+
       send(res, 404, { success: false, error: `No route for ${req.method} ${path}` })
     } catch (error) {
       send(res, 500, { success: false, error: error instanceof Error ? error.message : 'Internal error.' })

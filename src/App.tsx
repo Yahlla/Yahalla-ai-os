@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Activity, Bot, Check, ChevronRight, Circle as CircleHelp, Copy, Cpu, FileText, FolderKanban, Laptop, LogOut, Menu, MessageSquare, Monitor, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
+import { Activity, Bot, Check, ChevronRight, Circle as CircleHelp, Copy, Cpu, FileText, FolderKanban, GitBranch, Laptop, LogOut, Menu, MessageSquare, Monitor, Paperclip, Plus, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
 import './App.css'
 import { supabase } from './lib/supabase'
 import { signIn, signOut, signUp } from './lib/auth'
@@ -14,6 +14,7 @@ import type {
   AuditLog,
   ChatResponse,
   Device,
+  DeploymentProposal,
   Model,
   Permission,
   Profile,
@@ -34,6 +35,7 @@ type Page =
   | 'Servers'
   | 'Devices'
   | 'Approvals'
+  | 'Deployments'
   | 'Permissions'
   | 'Users'
   | 'Logs'
@@ -156,9 +158,9 @@ function Login() {
 
 function StatusBadge({ status }: { status: string }) {
   const colorClass =
-    status === 'online' || status === 'active' || status === 'completed' || status === 'approved'
+    status === 'online' || status === 'active' || status === 'completed' || status === 'approved' || status === 'deployed'
       ? 'badge-success'
-      : status === 'running' || status === 'pending' || status === 'queued'
+      : status === 'running' || status === 'pending' || status === 'queued' || status === 'deploying'
         ? 'badge-running'
         : status === 'waiting_approval' || status === 'waiting_device'
           ? 'badge-warning'
@@ -738,6 +740,120 @@ function ApprovalsSection() {
                   className="mini-button reject"
                   disabled={processing === approval.id}
                   onClick={() => handleAction(approval, 'reject')}
+                >
+                  <X size={14} /> Reject
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// Renders a unified diff with additions in green and removals in red --
+// the entire point of this page is that an admin can judge a proposed
+// change and click one button, never open a terminal.
+function DiffView({ diff }: { diff: string }) {
+  const lines = diff.split('\n')
+  return (
+    <pre className="diff-view">
+      {lines.map((line, i) => {
+        let cls = 'diff-line-context'
+        if (line.startsWith('+') && !line.startsWith('+++')) cls = 'diff-line-add'
+        else if (line.startsWith('-') && !line.startsWith('---')) cls = 'diff-line-remove'
+        else if (line.startsWith('@@')) cls = 'diff-line-hunk'
+        return (
+          <div key={i} className={cls}>
+            {line || ' '}
+          </div>
+        )
+      })}
+    </pre>
+  )
+}
+
+function DeploymentsSection({ profile }: { profile: Profile }) {
+  const [deployments, setDeployments] = useState<DeploymentProposal[]>([])
+  const [loading, setLoading] = useState(true)
+  const [processing, setProcessing] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
+
+  useEffect(() => {
+    api.getDeploymentProposals().then(setDeployments).finally(() => setLoading(false))
+  }, [])
+
+  async function handleAction(deployment: DeploymentProposal, action: 'approve' | 'reject') {
+    setProcessing(deployment.id)
+    try {
+      await api.decideDeploymentProposal(deployment.id, action, profile.id)
+      setDeployments((prev) =>
+        prev.map((d) =>
+          d.id === deployment.id ? { ...d, status: action === 'approve' ? 'approved' : 'rejected' } : d,
+        ),
+      )
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setProcessing(null)
+    }
+  }
+
+  if (loading) return <div className="loading-text">Loading deployments…</div>
+
+  const pendingCount = deployments.filter((d) => d.status === 'pending').length
+
+  return (
+    <div className="admin-section">
+      <div className="section-header">
+        <h2>Deployments</h2>
+        <p>{pendingCount} awaiting review · agent-proposed changes ship only after one-click approval, no terminal required</p>
+      </div>
+      <div className="card-grid deployments-grid">
+        {deployments.length === 0 && <p className="empty-state">No deployment proposals yet.</p>}
+        {deployments.map((deployment) => (
+          <div key={deployment.id} className="data-card deployment-card">
+            <div className="data-card-header">
+              <div className="data-card-icon">
+                <GitBranch size={18} />
+              </div>
+              <div className="data-card-title">
+                <div className="data-card-name">{deployment.title}</div>
+                <div className="data-card-sub">
+                  {deployment.proposed_by_agent ? `${deployment.proposed_by_agent} · ` : ''}
+                  {deployment.git_ref} → {deployment.base_ref} · {new Date(deployment.created_at).toLocaleString()}
+                </div>
+              </div>
+              <StatusBadge status={deployment.status} />
+            </div>
+            {deployment.description && <p className="data-card-desc">{deployment.description}</p>}
+            <button
+              className="mini-button"
+              onClick={() => setExpanded(expanded === deployment.id ? null : deployment.id)}
+            >
+              {expanded === deployment.id ? 'Hide diff' : 'View diff'}
+            </button>
+            {expanded === deployment.id && <DiffView diff={deployment.diff} />}
+            {deployment.deploy_log && (
+              <details className="deploy-log">
+                <summary>Deploy log</summary>
+                <pre>{deployment.deploy_log}</pre>
+              </details>
+            )}
+            {deployment.status === 'pending' && (
+              <div className="data-card-actions">
+                <button
+                  className="mini-button approve"
+                  disabled={processing === deployment.id}
+                  onClick={() => handleAction(deployment, 'approve')}
+                >
+                  <Check size={14} /> Approve & Ship
+                </button>
+                <button
+                  className="mini-button reject"
+                  disabled={processing === deployment.id}
+                  onClick={() => handleAction(deployment, 'reject')}
                 >
                   <X size={14} /> Reject
                 </button>
@@ -1473,6 +1589,7 @@ const adminNav: NavItem[] = [
   { label: 'Servers', icon: Server, adminOnly: true },
   { label: 'Devices', icon: Laptop, adminOnly: true },
   { label: 'Approvals', icon: ShieldCheck, adminOnly: true },
+  { label: 'Deployments', icon: GitBranch, adminOnly: true },
   { label: 'Permissions', icon: Shield, adminOnly: true },
   { label: 'Users', icon: Users, adminOnly: true },
   { label: 'Logs', icon: Activity, adminOnly: true },
@@ -1519,6 +1636,8 @@ function ControlCenter({
         return <DevicesSection />
       case 'Approvals':
         return <ApprovalsSection />
+      case 'Deployments':
+        return <DeploymentsSection profile={profile} />
       case 'Permissions':
         return <PermissionsSection />
       case 'Users':

@@ -209,6 +209,24 @@ export type Approval = {
   decided_at: string | null
 }
 
+export type DeploymentProposal = {
+  id: string
+  title: string
+  description: string | null
+  git_ref: string
+  base_ref: string
+  diff: string
+  status: string
+  proposed_by: string | null
+  proposed_by_agent: string | null
+  decided_by: string | null
+  decided_at: string | null
+  deployed_at: string | null
+  deploy_log: string | null
+  created_at: string
+  updated_at: string
+}
+
 export type AuditLog = {
   id: string
   actor_user_id: string | null

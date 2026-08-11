@@ -1,0 +1,24 @@
+{
+  "name": "@yahalla/deploy-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The only thing on the Strato VPS allowed to run 'git pull' and 'docker compose up'. Polls for admin-approved deployment_proposals (never anything else) and runs one hardcoded deploy script per proposal -- no arbitrary command execution. This is what makes the admin panel's one-click deploy possible without turning it into a remote shell.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/test/deploy.test.js dist/test/worker.test.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/pg": "^8.11.10",
+    "typescript": "~6.0.2"
+  }
+}

@@ -601,6 +601,78 @@ button {
   background: rgba(239,68,68,.15);
 }
 
+/* Deployments diff view */
+
+.deployments-grid .deployment-card {
+  grid-column: 1 / -1;
+}
+
+.diff-view {
+  margin: 10px 0 0;
+  padding: 10px 0;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 10px;
+  background: #05060a;
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre;
+}
+
+.diff-view > div {
+  padding: 0 12px;
+}
+
+.diff-line-add {
+  color: #6ee7b7;
+  background: rgba(16,185,129,.1);
+}
+
+.diff-line-remove {
+  color: #fca5a5;
+  background: rgba(239,68,68,.1);
+}
+
+.diff-line-hunk {
+  color: #93c5fd;
+  background: rgba(59,130,246,.08);
+}
+
+.diff-line-context {
+  color: rgba(255,255,255,.45);
+}
+
+.deploy-log {
+  margin-top: 10px;
+  font-size: 11px;
+  color: rgba(255,255,255,.5);
+}
+
+.deploy-log summary {
+  cursor: pointer;
+  color: rgba(255,255,255,.6);
+}
+
+.deploy-log pre {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #05060a;
+  border: 1px solid rgba(255,255,255,.07);
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10px;
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.empty-state {
+  color: rgba(255,255,255,.35);
+  font-size: 12px;
+}
+
 /* Approval tag */
 
 .approval-tag {

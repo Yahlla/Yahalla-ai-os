@@ -140,3 +140,56 @@ test('a stranger cannot see another user\'s tasks (RLS isolation)', async () => 
   assert.equal(status, 200)
   assert.equal(body.devices.length, 0)
 })
+
+// humanUserId was the very first row ever inserted into auth.users this
+// test run, so the ported handle_new_user() trigger (same one Supabase
+// uses) made it the platform's first-ever "owner" -- exactly the admin
+// the deployment_proposals RLS policy (is_admin()) requires.
+let proposalId: string
+
+test('an admin can propose a deployment (self-evolving agent path)', async () => {
+  const { status, body } = await api(
+    '/deployments',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        title: 'Fix flaky heartbeat test',
+        description: 'Agent-diagnosed timing issue in device heartbeat handling.',
+        git_ref: 'agent/fix-heartbeat-flake',
+        diff: '--- a/platform/api/src/pairing.ts\n+++ b/platform/api/src/pairing.ts\n@@ -1 +1 @@\n-old\n+new\n',
+        proposed_by_agent: 'coding-agent',
+      }),
+    },
+    humanJwt,
+  )
+  assert.equal(status, 200)
+  assert.equal(body.deployment.status, 'pending')
+  assert.equal(body.deployment.base_ref, 'main')
+  proposalId = body.deployment.id
+})
+
+test('a non-admin cannot see deployment proposals (RLS admin-only isolation)', async () => {
+  const strangerId = randomUUID()
+  await getPool().query('INSERT INTO auth.users (id, email) VALUES ($1, $2)', [strangerId, 'stranger2@test.local'])
+  const strangerJwt = signTestJwt(strangerId)
+
+  const { status, body } = await api('/deployments', {}, strangerJwt)
+  assert.equal(status, 200)
+  assert.equal(body.deployments.length, 0)
+})
+
+test('the admin sees the pending proposal and approves it with one click', async () => {
+  const list = await api('/deployments', {}, humanJwt)
+  assert.equal(list.status, 200)
+  assert.ok(list.body.deployments.some((d: any) => d.id === proposalId))
+
+  const { status, body } = await api(`/deployments/${proposalId}/decide`, { method: 'POST', body: JSON.stringify({ decision: 'approve' }) }, humanJwt)
+  assert.equal(status, 200)
+  assert.equal(body.status, 'approved')
+})
+
+test('the same proposal cannot be decided twice', async () => {
+  const { status, body } = await api(`/deployments/${proposalId}/decide`, { method: 'POST', body: JSON.stringify({ decision: 'reject' }) }, humanJwt)
+  assert.equal(status, 409)
+  assert.ok(body.error)
+})
