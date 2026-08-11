@@ -36,7 +36,14 @@ async function pickModelId(): Promise<string> {
     // "advanced" was the explicit requirement, not just "responds".
     .sort((a, b) => (b.vram_required_MB ?? 0) - (a.vram_required_MB ?? 0))
 
-  const ceilingMB = isLikelyPhone() ? 2500 : 4500
+  // Biased toward a fast first download, not maximum quality: this is the
+  // path a brand-new visitor with no local-runtime hits, so the priority
+  // is "finishes downloading and answers quickly" over "the single best
+  // model that technically fits in VRAM" -- a multi-GB first download on
+  // an average connection reads as broken, not just slow. Users who want
+  // the strongest local model should run local-runtime instead (small,
+  // fast to fetch, no browser download at all).
+  const ceilingMB = isLikelyPhone() ? 1200 : 2000
   const withinBudget = candidates.filter((m) => (m.vram_required_MB ?? 0) <= ceilingMB)
   const picked = withinBudget[0] ?? candidates[candidates.length - 1]
   if (!picked) throw new Error('No compatible local model found in the WebLLM catalog.')

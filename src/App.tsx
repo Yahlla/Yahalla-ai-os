@@ -1502,7 +1502,9 @@ function ChatSection() {
   const [lastResult, setLastResult] = useState<ChatResponse | null>(null)
   const [liveStatus, setLiveStatus] = useState<{ state: string; summary: string | null } | null>(null)
   const [modelLoadProgress, setModelLoadProgress] = useState<{ progress: number; text: string } | null>(null)
+  const [modelLoadStalled, setModelLoadStalled] = useState(false)
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null)
+  const [runtimeTier, setRuntimeTier] = useState<'local' | 'browser' | 'cloud' | null>(null)
   const browserHistoryRef = useRef<BrowserChatMessage[]>([])
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -1554,6 +1556,30 @@ function ChatSection() {
     api.getModels().then((m) => setModels(m.filter((x) => x.enabled)))
   }, [])
 
+  // Which tier will actually answer the next message -- shown to the user
+  // so "why is this slow / downloading" has an answer before they even
+  // send anything, and so local-runtime (the fast, no-download path) gets
+  // surfaced as the thing to install rather than staying invisible
+  // plumbing only power users know about.
+  useEffect(() => {
+    let cancelled = false
+    async function detectTier() {
+      if (await localRuntime.checkRuntimeHealth()) {
+        if (!cancelled) setRuntimeTier('local')
+        return
+      }
+      if (await browserRuntime.checkBrowserRuntimeAvailable()) {
+        if (!cancelled) setRuntimeTier('browser')
+        return
+      }
+      if (!cancelled) setRuntimeTier('cloud')
+    }
+    detectTier()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, sending])
@@ -1596,20 +1622,44 @@ function ChatSection() {
       let result: ChatResponse
 
       if (runtimeUp) {
+        setRuntimeTier('local')
         result = await localRuntime.sendChatMessage({ message, conversation_id: conversationId ?? undefined })
       } else if (await browserRuntime.checkBrowserRuntimeAvailable()) {
+        setRuntimeTier('browser')
         if (!browserRuntime.browserModelReady()) {
           setLiveStatus({ state: 'THINKING', summary: 'Downloading local model to this device…' })
-          await browserRuntime.prepareBrowserModel((p) => {
-            setModelLoadProgress(p)
-            setLiveStatus({ state: 'THINKING', summary: p.text || `Downloading local model… ${Math.round(p.progress * 100)}%` })
-          })
+          setModelLoadStalled(false)
+
+          // A silent progress bar stuck at 0% reads as broken, not slow --
+          // if no progress event arrives for a while, this is almost
+          // always the browser failing to reach the model host (a slow,
+          // restrictive, or blocking network), not a fast, temporary
+          // pause. Say so plainly and point at the real fix (local-runtime
+          // needs no such download at all) instead of leaving the user
+          // staring at "0%" with no explanation.
+          let lastProgressAt = Date.now()
+          const stallCheck = setInterval(() => {
+            if (Date.now() - lastProgressAt > 15_000) setModelLoadStalled(true)
+          }, 3000)
+
+          try {
+            await browserRuntime.prepareBrowserModel((p) => {
+              lastProgressAt = Date.now()
+              setModelLoadStalled(false)
+              setModelLoadProgress(p)
+              setLiveStatus({ state: 'THINKING', summary: p.text || `Downloading local model… ${Math.round(p.progress * 100)}%` })
+            })
+          } finally {
+            clearInterval(stallCheck)
+          }
           setModelLoadProgress(null)
+          setModelLoadStalled(false)
         }
         const browserResult = await browserRuntime.sendChatMessage(browserHistoryRef.current, message)
         browserHistoryRef.current = browserResult.updatedHistory
         result = browserResult
       } else {
+        setRuntimeTier('cloud')
         result = await api.sendChatMessage({
           message,
           conversation_id: conversationId ?? undefined,
@@ -1699,9 +1749,23 @@ function ChatSection() {
             <div className="chat-agent-name">Yahalla Core</div>
             <div className="chat-agent-status">
               <span />
-              AI Orchestrator · Online
+              {runtimeTier === 'local' && 'Local Runtime · Full speed on this device'}
+              {runtimeTier === 'browser' && 'Browser Mode (WebGPU) · one-time download'}
+              {runtimeTier === 'cloud' && 'Cloud fallback'}
+              {runtimeTier === null && 'AI Orchestrator · Online'}
             </div>
           </div>
+          {runtimeTier && runtimeTier !== 'local' && (
+            <a
+              className="runtime-tier-cta"
+              href="https://github.com/Yahlla/Yahalla-ai-os/blob/main/scripts/setup-local.sh"
+              target="_blank"
+              rel="noreferrer"
+              title="Run once on your device for instant, no-download responses"
+            >
+              <Zap size={12} /> Get full speed
+            </a>
+          )}
         </div>
 
         <div className="chat-controls">
@@ -1852,10 +1916,18 @@ function ChatSection() {
         <div className="composer-area">
           {error && <div className="composer-error">{error}</div>}
 
-          {modelLoadProgress && (
+          {modelLoadProgress && !modelLoadStalled && (
             <div className="composer-error" style={{ background: 'rgba(99,102,241,0.12)', color: 'inherit' }}>
               جارٍ تحميل النموذج المحلي على هذا الجهاز (مرة واحدة فقط)… {Math.round(modelLoadProgress.progress * 100)}%
               {modelLoadProgress.text ? ` — ${modelLoadProgress.text}` : ''}
+            </div>
+          )}
+
+          {modelLoadProgress && modelLoadStalled && (
+            <div className="composer-error">
+              التحميل بطيء جداً أو محجوب من شبكتك الحالية ({Math.round(modelLoadProgress.progress * 100)}% فقط منذ فترة).
+              للحصول على سرعة وقوة فورية بدون أي تحميل، شغّل local-runtime على جهازك مرة واحدة:{' '}
+              <code>sh scripts/setup-local.sh</code>
             </div>
           )}
 
