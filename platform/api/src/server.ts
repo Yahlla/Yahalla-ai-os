@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { getPool, withUserSession } from './db.js'
 import { verifyJwt } from './jwt.js'
+import { toVectorLiteral, validateEmbedding } from './memory.js'
 import { authenticateDevice, createPairingCode, ensureHumanUser, exchangePairingCode, recordHeartbeat } from './pairing.js'
 
 export type PlatformConfig = {
@@ -204,6 +205,82 @@ export function createPlatformServer(config: PlatformConfig) {
           return send(res, 409, { success: false, error: 'Deployment proposal was already decided or does not exist.' })
         }
         return send(res, 200, { success: true, status: decision })
+      }
+
+      // Central, cross-device semantic memory -- the embedding itself is
+      // computed on the caller's own device (browser/local-runtime) and
+      // sent here as a plain float array; this route only ever stores and
+      // searches vectors via pgvector, it never runs a model. That split
+      // is what keeps this appropriate for a resource-modest coordination
+      // server.
+      if (path === '/memory' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const content = String(body.content ?? '')
+        if (!content.trim()) return send(res, 400, { success: false, error: 'content is required.' })
+
+        let embedding: number[]
+        try {
+          embedding = validateEmbedding(body.embedding)
+        } catch (error) {
+          return send(res, 400, { success: false, error: error instanceof Error ? error.message : 'Invalid embedding.' })
+        }
+
+        const source = typeof body.source === 'string' ? body.source : 'agent'
+        const created = await withUserSession(identity.userId, (client) =>
+          client.query(
+            `INSERT INTO memory_entries (owner_id, project_id, source, content, embedding, metadata)
+             VALUES ($1, $2, $3, $4, $5::vector, $6) RETURNING id, owner_id, project_id, source, content, metadata, created_at`,
+            [
+              identity.userId,
+              typeof body.project_id === 'string' ? body.project_id : null,
+              source,
+              content,
+              toVectorLiteral(embedding),
+              JSON.stringify(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
+            ],
+          ),
+        )
+        return send(res, 200, { success: true, entry: created.rows[0] })
+      }
+
+      if (path === '/memory/search' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        let embedding: number[]
+        try {
+          embedding = validateEmbedding(body.embedding)
+        } catch (error) {
+          return send(res, 400, { success: false, error: error instanceof Error ? error.message : 'Invalid embedding.' })
+        }
+        const limit = Math.min(Math.max(Number(body.limit) || 10, 1), 50)
+        const projectId = typeof body.project_id === 'string' ? body.project_id : null
+
+        const rows = await withUserSession(identity.userId, (client) =>
+          client.query(
+            `SELECT id, project_id, source, content, metadata, created_at,
+                    1 - (embedding <=> $1::vector) AS similarity
+             FROM memory_entries
+             WHERE ($2::uuid IS NULL OR project_id = $2::uuid)
+             ORDER BY embedding <=> $1::vector
+             LIMIT $3`,
+            [toVectorLiteral(embedding), projectId, limit],
+          ),
+        )
+        return send(res, 200, { results: rows.rows })
+      }
+
+      if (path === '/memory' && req.method === 'GET') {
+        const projectId = url.searchParams.get('project_id')
+        const rows = await withUserSession(identity.userId, (client) =>
+          projectId
+            ? client.query(
+                'SELECT id, project_id, source, content, metadata, created_at FROM memory_entries WHERE project_id = $1 ORDER BY created_at DESC LIMIT 50',
+                [projectId],
+              )
+            : client.query(
+                'SELECT id, project_id, source, content, metadata, created_at FROM memory_entries ORDER BY created_at DESC LIMIT 50',
+              ),
+        )
+        return send(res, 200, { entries: rows.rows })
       }
 
       send(res, 404, { success: false, error: `No route for ${req.method} ${path}` })

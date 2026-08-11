@@ -16,7 +16,11 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector's own image (Postgres 16 + the vector extension pre-built)
+    # -- the Vector DB Core migration (memory_entries) needs CREATE
+    # EXTENSION vector to actually be available; the stock postgres:16-alpine
+    # image doesn't ship it.
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_DB: yahalla

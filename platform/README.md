@@ -24,6 +24,30 @@ their own device (browser WebGPU or the Electron/local-runtime app). See
   automatic TLS, per-IP rate limiting via a custom build with
   `caddy-ratelimit`). Every service has an explicit `mem_limit`/`cpus`.
 
+## Vector DB Core (cross-device semantic memory)
+
+`memory_entries` (in the `20260814000000_vector_memory_core.sql` migration)
+is a pgvector-backed table for semantic memory shared across a user's
+devices -- store a piece of context once, retrieve it by meaning later,
+regardless of which device wrote it. Deliberately narrow about what runs
+where:
+
+- **Embeddings are computed on the caller's own device** (browser or
+  local-runtime), never by platform-api. This is what keeps it
+  appropriate for a resource-modest VPS: storing a vector and ranking
+  rows by cosine distance (`api/src/memory.ts`, `POST /memory`,
+  `POST /memory/search`) is cheap linear algebra pgvector's HNSW index
+  handles fine -- nothing here is a model forward pass.
+- The Postgres image is `pgvector/pgvector:pg16` (not the stock
+  `postgres:16-alpine`) specifically so `CREATE EXTENSION vector` has
+  something to install.
+- 384-dimension vectors, matching small client-side-friendly embedding
+  models (e.g. all-MiniLM-L6-v2 class) -- swap the column dimension (and
+  re-embed existing rows) if a different embedding model is chosen.
+- RLS-scoped like everything else: a user only ever sees their own
+  entries, verified in `api/test/server.test.ts` (including that search
+  ranks by real cosine similarity, not just returns rows).
+
 ## Load protection
 
 Two independent layers, neither trusting the other to be enough alone:

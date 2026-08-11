@@ -10,6 +10,15 @@ function base64Url(input: Buffer | string): string {
   return Buffer.from(input).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
+// A 384-length vector with a single distinct component -- enough to make
+// cosine-similarity ordering fully predictable in tests without needing a
+// real embedding model.
+function makeEmbedding(primaryIndex: number, magnitude = 1): number[] {
+  const v = new Array(384).fill(0)
+  v[primaryIndex] = magnitude
+  return v
+}
+
 function signTestJwt(sub: string): string {
   const header = base64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
   const payload = base64Url(JSON.stringify({ sub, exp: Math.floor(Date.now() / 1000) + 3600 }))
@@ -204,4 +213,50 @@ test('a brand-new human (no pre-existing auth.users row) is auto-provisioned on 
 
   const { rows } = await getPool().query('SELECT id FROM auth.users WHERE id = $1', [freshUserId])
   assert.equal(rows.length, 1)
+})
+
+// Vector DB core: the embedding is computed by the caller (browser/
+// local-runtime), never by platform-api itself -- these tests send
+// synthetic 384-dim vectors, not real embeddings, since the point here is
+// verifying storage/search/RLS behave correctly, not embedding quality.
+test('storing a memory entry rejects a wrong-length embedding', async () => {
+  const { status, body } = await api('/memory', { method: 'POST', body: JSON.stringify({ content: 'x', embedding: [1, 2, 3] }) }, humanJwt)
+  assert.equal(status, 400)
+  assert.match(body.error, /384/)
+})
+
+test('a human can store a memory entry with a valid embedding', async () => {
+  const { status, body } = await api(
+    '/memory',
+    { method: 'POST', body: JSON.stringify({ content: 'remember this', embedding: makeEmbedding(0), source: 'agent' }) },
+    humanJwt,
+  )
+  assert.equal(status, 200)
+  assert.equal(body.entry.content, 'remember this')
+  assert.equal(body.entry.source, 'agent')
+})
+
+test('semantic search ranks the closest embedding first, by real cosine distance', async () => {
+  await api('/memory', { method: 'POST', body: JSON.stringify({ content: 'about apples', embedding: makeEmbedding(10) }) }, humanJwt)
+  await api('/memory', { method: 'POST', body: JSON.stringify({ content: 'about oranges', embedding: makeEmbedding(50) }) }, humanJwt)
+
+  const { status, body } = await api('/memory/search', { method: 'POST', body: JSON.stringify({ embedding: makeEmbedding(10), limit: 5 }) }, humanJwt)
+  assert.equal(status, 200)
+  assert.ok(body.results.length >= 1)
+  assert.equal(body.results[0].content, 'about apples')
+  assert.ok(body.results[0].similarity > 0.99, `expected near-1.0 similarity for an exact match, got ${body.results[0].similarity}`)
+})
+
+test('a stranger cannot see or search another user\'s memory entries (RLS isolation)', async () => {
+  const strangerId = randomUUID()
+  await getPool().query('INSERT INTO auth.users (id, email) VALUES ($1, $2)', [strangerId, 'memory-stranger@test.local'])
+  const strangerJwt = signTestJwt(strangerId)
+
+  const list = await api('/memory', {}, strangerJwt)
+  assert.equal(list.status, 200)
+  assert.equal(list.body.entries.length, 0)
+
+  const search = await api('/memory/search', { method: 'POST', body: JSON.stringify({ embedding: makeEmbedding(10) }) }, strangerJwt)
+  assert.equal(search.status, 200)
+  assert.equal(search.body.results.length, 0)
 })
