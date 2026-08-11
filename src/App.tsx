@@ -419,10 +419,49 @@ function ModelsSection() {
 function ServersSection() {
   const [servers, setServers] = useState<ServerType[]>([])
   const [loading, setLoading] = useState(true)
+  const [connecting, setConnecting] = useState(false)
+  const [connectName, setConnectName] = useState('')
+  const [connectUrl, setConnectUrl] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+
+  function load() {
+    setLoading(true)
+    api.getServers().then(setServers).finally(() => setLoading(false))
+  }
 
   useEffect(() => {
-    api.getServers().then(setServers).finally(() => setLoading(false))
+    load()
   }, [])
+
+  async function handleConnect(event: FormEvent) {
+    event.preventDefault()
+    setError('')
+    setBusy('connect')
+    try {
+      const server = await api.connectServer(connectUrl.trim(), connectName.trim() || connectUrl.trim())
+      setServers((prev) => [server, ...prev])
+      setConnecting(false)
+      setConnectName('')
+      setConnectUrl('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not reach that server. Check the URL and try again.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function handleRefresh(server: ServerType) {
+    setBusy(server.id)
+    try {
+      await api.refreshServerHealth(server)
+      load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Health check failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
 
   if (loading) return <div className="loading-text">Loading servers…</div>
 
@@ -432,6 +471,50 @@ function ServersSection() {
         <h2>Servers</h2>
         <p>{servers.length} execution nodes registered</p>
       </div>
+
+      <div className="data-card-actions" style={{ marginBottom: 20 }}>
+        <button className="mini-button approve" onClick={() => setConnecting((v) => !v)}>
+          <Server size={14} /> Connect a Server (VPS)
+        </button>
+      </div>
+
+      {error && <p className="data-card-desc" style={{ color: '#fca5a5' }}>{error}</p>}
+
+      {connecting && (
+        <form className="data-card" style={{ marginBottom: 20 }} onSubmit={handleConnect}>
+          <div className="data-card-header">
+            <div className="data-card-icon"><Server size={18} /></div>
+            <div className="data-card-title">
+              <div className="data-card-name">Connect a self-hosted control plane</div>
+              <div className="data-card-sub">Its public URL, from `sh scripts/setup-strato.sh` -- one click, no terminal</div>
+            </div>
+          </div>
+          <input
+            className="text-input"
+            placeholder="Name (e.g. Strato Production)"
+            value={connectName}
+            onChange={(e) => setConnectName(e.target.value)}
+            style={{ marginBottom: 8, width: '100%' }}
+          />
+          <input
+            className="text-input"
+            placeholder="https://your-domain.example.com"
+            value={connectUrl}
+            onChange={(e) => setConnectUrl(e.target.value)}
+            required
+            style={{ width: '100%' }}
+          />
+          <div className="data-card-actions">
+            <button className="mini-button approve" type="submit" disabled={busy === 'connect'}>
+              <Check size={14} /> {busy === 'connect' ? 'Checking…' : 'Connect'}
+            </button>
+            <button className="mini-button reject" type="button" onClick={() => setConnecting(false)}>
+              <X size={14} /> Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
       <div className="card-grid">
         {servers.map((server) => (
           <div key={server.id} className="data-card">
@@ -463,6 +546,13 @@ function ServersSection() {
                 {Object.keys(server.capabilities || {}).join(', ') || '—'}
               </span>
             </div>
+            {server.capabilities?.self_hosted === true && (
+              <div className="data-card-actions">
+                <button className="mini-button" disabled={busy === server.id} onClick={() => handleRefresh(server)}>
+                  <Activity size={14} /> {busy === server.id ? 'Checking…' : 'Check status'}
+                </button>
+              </div>
+            )}
           </div>
         ))}
       </div>

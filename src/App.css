@@ -904,6 +904,20 @@ button {
   border-color: rgba(155,146,255,.35);
 }
 
+.text-input {
+  padding: 8px 12px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 8px;
+  color: #fff;
+  background: rgba(0,0,0,.2);
+  font-size: 12px;
+}
+
+.text-input:focus {
+  outline: none;
+  border-color: rgba(155,146,255,.35);
+}
+
 /* =============================================================
    Chat
    ============================================================= */

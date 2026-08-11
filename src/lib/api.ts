@@ -294,9 +294,43 @@ export async function updateServer(id: string, updates: Partial<Server>): Promis
   if (error) throw error
 }
 
-export async function createServer(server: Partial<Server>): Promise<void> {
-  const { error } = await supabase.from('servers').insert(server)
+export async function createServer(server: Partial<Server>): Promise<Server> {
+  const { data, error } = await supabase.from('servers').insert(server).select('*').single()
   if (error) throw error
+  return data as Server
+}
+
+// "Connect this VPS" -- the self-hosted control plane (platform-api,
+// fronted by Caddy at its own domain) exposes an unauthenticated /health
+// endpoint for exactly this: a one-click reachability check from the admin
+// panel, no terminal/SSH involved. baseUrl is stored in capabilities so
+// later status refreshes (see refreshServerHealth) know where to ping.
+export async function connectServer(baseUrl: string, name: string): Promise<Server> {
+  const url = new URL(baseUrl)
+  const health = await fetch(new URL('/health', url)).then((r) => r.json()).catch(() => null)
+  const online = health?.status === 'ok'
+
+  return createServer({
+    name,
+    type: 'remote',
+    hostname: url.hostname,
+    port: url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80),
+    status: online ? 'online' : 'offline',
+    capabilities: { self_hosted: true, base_url: url.origin },
+    last_heartbeat: online ? new Date().toISOString() : null,
+  })
+}
+
+export async function refreshServerHealth(server: Server): Promise<void> {
+  const baseUrl = server.capabilities?.base_url
+  if (typeof baseUrl !== 'string') return
+
+  const health = await fetch(new URL('/health', baseUrl)).then((r) => r.json()).catch(() => null)
+  const online = health?.status === 'ok'
+  await updateServer(server.id, {
+    status: online ? 'online' : 'offline',
+    last_heartbeat: online ? new Date().toISOString() : server.last_heartbeat,
+  })
 }
 
 export async function updateModel(id: string, updates: Partial<Model>): Promise<void> {
