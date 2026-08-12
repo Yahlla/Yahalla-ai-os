@@ -2974,7 +2974,28 @@ function ChatSection() {
         return { success: true, answer: `${agentResult.summary}${prNote}`, conversation_id: conversationId ?? undefined }
       }
 
-      if (codingAgentEnabled && platformApi.isPlatformApiConfigured()) {
+      // Cloud is the primary brain by default: when the platform's cloud
+      // smart tier is configured (Settings -> Cloud Smart Tier -- Claude
+      // or an OpenAI-compatible 70B model), every message tries it FIRST,
+      // ahead of local-runtime and browser WebGPU, not just as a
+      // last-resort fallback for devices with neither on-device tier. This
+      // is what makes "no local Agent required" literally true: a fresh
+      // browser with nothing installed gets the same primary brain as a
+      // machine running local-runtime. Skipped when an explicit toggle
+      // below already picked a specific path this turn, and falls straight
+      // through to the existing local/browser/legacy chain if the cloud
+      // call itself fails (network issue, not yet configured, rate
+      // limited) -- cloud-primary, not cloud-only.
+      let cloudPrimaryResult: ChatResponse | null = null
+      if (!codingAgentEnabled && !deviceTaskEnabled && !cloudBoostEnabled && platformApi.isPlatformApiConfigured()) {
+        setRuntimeTier('cloud')
+        const attempt = await callCloudBoost()
+        if (attempt.success) cloudPrimaryResult = attempt
+      }
+
+      if (cloudPrimaryResult) {
+        result = cloudPrimaryResult
+      } else if (codingAgentEnabled && platformApi.isPlatformApiConfigured()) {
         setRuntimeTier('cloud')
         result = await callCodingAgent()
       } else if (deviceTaskEnabled && platformApi.isPlatformApiConfigured()) {
