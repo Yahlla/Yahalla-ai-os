@@ -104,6 +104,7 @@ export async function sendChatMessage(params: { message: string; conversation_id
     executed_tools: result.executedTools?.map((t, i) => ({ ...t, execution_id: `${result.taskId ?? 'local'}:${i}` })),
     approval_required: result.status === 'waiting_approval',
     tool_execution_id: result.approvalId,
+    approval_tool: result.approvalTool,
   }
 }
 

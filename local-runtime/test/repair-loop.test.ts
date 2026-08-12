@@ -99,8 +99,8 @@ before(async () => {
   grantPermission(db, 'project', projectDir, 'write')
   grantPermission(db, 'command_execution', '*', 'execute')
 
-  fakeLlm = await startRepairFakeLlm(18082)
-  const modelProcess = new LocalModelProcess(18082)
+  fakeLlm = await startRepairFakeLlm(18084)
+  const modelProcess = new LocalModelProcess(18084)
   ;(modelProcess as any).child = { exitCode: null, killed: false }
 
   const config: RuntimeConfig = { port: 0, authToken, projectRoot: projectDir, allowedOrigins: [] }
@@ -125,40 +125,25 @@ async function api(path: string, init: RequestInit = {}): Promise<{ status: numb
   return { status: response.status, body: (await response.json()) as any }
 }
 
-async function approveNextPending(): Promise<any> {
-  const { body } = await api('/approvals')
-  const pending = body.approvals.find((a: any) => a.status === 'pending')
-  assert.ok(pending, 'expected a pending approval to approve')
-  const decided = await api(`/approvals/${pending.id}/decide`, { method: 'POST', body: JSON.stringify({ decision: 'approve' }) })
-  return decided.body
-}
-
-test('agent inspects a real failing test, diagnoses it, repairs it, and re-verifies with the real test command', async () => {
+test('agent inspects a real failing test, diagnoses it, repairs it, and re-verifies with the real test command -- fully autonomously, no approval prompts', async () => {
   assert.equal(readFileSync(join(projectDir, 'flag.txt'), 'utf8').trim(), 'broken')
 
-  // Round 1: agent runs `npm test` for real -- it will actually fail.
-  let result = (await api('/chat', { method: 'POST', body: JSON.stringify({ message: 'Run the tests and fix them if they fail.' }) })).body
-  assert.equal(result.status, 'waiting_approval')
-  assert.equal(result.approvalTool, 'run_project_command')
+  // run_project_command and patch_project_file are no longer approval-gated
+  // (the coding loop's real review checkpoint is a pull request, not a
+  // per-step prompt -- see tools.ts) -- so the whole diagnose/patch/
+  // re-verify cycle now runs to completion in a single request.
+  const result = (await api('/chat', { method: 'POST', body: JSON.stringify({ message: 'Run the tests and fix them if they fail.' }) })).body
 
-  result = await approveNextPending()
-  assert.equal(result.status, 'waiting_approval', 'should now be asking to patch flag.txt after a real observed failure')
-  assert.equal(result.approvalTool, 'patch_project_file')
-
-  // The patch has not been approved yet -- file must still be broken.
-  assert.equal(readFileSync(join(projectDir, 'flag.txt'), 'utf8').trim(), 'broken')
-
-  result = await approveNextPending()
-  assert.equal(readFileSync(join(projectDir, 'flag.txt'), 'utf8').trim(), 'fixed', 'patch should have actually been applied to disk')
-  assert.equal(result.status, 'waiting_approval', 'should re-run the real test command to verify, not just claim success')
-  assert.equal(result.approvalTool, 'run_project_command')
-
-  result = await approveNextPending()
   assert.equal(result.status, 'completed')
   assert.match(result.answer, /pass/i)
+  assert.equal(readFileSync(join(projectDir, 'flag.txt'), 'utf8').trim(), 'fixed', 'patch should have actually been applied to disk')
 
   const runResults = result.executedTools.filter((t: any) => t.tool === 'run_project_command')
   assert.equal(runResults.length, 2, 'expected the test command to have actually run twice: once failing, once passing')
   assert.equal(runResults[0].result.success, false)
   assert.equal(runResults[1].result.success, true)
+
+  const patchResults = result.executedTools.filter((t: any) => t.tool === 'patch_project_file')
+  assert.equal(patchResults.length, 1)
+  assert.equal(patchResults[0].result.success, true)
 })

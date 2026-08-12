@@ -92,3 +92,48 @@ export async function githubWrite(token: string | undefined, args: Record<string
     },
   }
 }
+
+// The autonomous coding loop's actual review checkpoint: opens a real PR
+// for a branch already committed (git_commit) and pushed (git_push).
+// Never gated -- opening a PR is what makes a change reviewable, so
+// gating it would defeat the point. Merging is a separate, manual human
+// action this codebase deliberately never automates.
+export async function githubOpenPr(token: string | undefined, args: Record<string, unknown>) {
+  if (!token) {
+    return { success: false, operation: 'github.open_pr', message: 'No GitHub token configured. Add one in Settings to enable opening pull requests.' }
+  }
+  const owner = String(args.owner ?? '').trim()
+  const repo = String(args.repo ?? '').trim()
+  const title = String(args.title ?? '').trim()
+  const head = String(args.head ?? '').trim()
+  const base = typeof args.base === 'string' && args.base.trim() ? args.base.trim() : 'main'
+  if (!owner || !repo || !title || !head) {
+    return { success: false, operation: 'github.open_pr', message: 'owner, repo, title, and head are required.' }
+  }
+
+  const response = await fetch(`${githubApiBase()}/repos/${owner}/${repo}/pulls`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'yahalla-ai-os-local-runtime',
+    },
+    body: JSON.stringify({ title, head, base, body: typeof args.body === 'string' ? args.body : undefined }),
+  })
+  const text = await response.text()
+  if (!response.ok) {
+    return { success: false, operation: 'github.open_pr', status: response.status, message: 'GitHub API request failed.', details: text.slice(0, 2000) }
+  }
+  let pr: any = {}
+  try {
+    pr = JSON.parse(text)
+  } catch {
+    pr = {}
+  }
+  return {
+    success: true,
+    operation: 'github.open_pr',
+    pull_request: { number: pr.number, html_url: pr.html_url, title: pr.title, state: pr.state, head: pr.head?.ref, base: pr.base?.ref },
+  }
+}

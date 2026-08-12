@@ -31,6 +31,9 @@ function startFakeGithub(port: number): Promise<Server> {
     if (req.url?.startsWith('/user/repos') && req.method === 'GET') {
       return send(200, [{ name: 'yahalla-ai-os', full_name: 'octo-owner/yahalla-ai-os', private: true, html_url: 'https://github.com/octo-owner/yahalla-ai-os', clone_url: '', ssh_url: '', default_branch: 'main', updated_at: '2026-01-01T00:00:00Z' }])
     }
+    if (req.url === '/repos/octo-owner/yahalla-ai-os/pulls' && req.method === 'POST') {
+      return send(200, { number: 42, html_url: 'https://github.com/octo-owner/yahalla-ai-os/pull/42', title: 'Fix the bug', state: 'open', head: { ref: 'fix/bug' }, base: { ref: 'main' } })
+    }
     send(404, {})
   })
   return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve(server)))
@@ -117,6 +120,36 @@ test('the connected token is what agentLoop\'s github.read tool actually uses (r
   assert.equal(result.success, true)
   assert.equal((result as any).count, 1)
   assert.equal((result as any).repos[0].full_name, 'octo-owner/yahalla-ai-os')
+})
+
+test('githubOpenPr opens a real pull request via the GitHub API and never requires approval (the autonomous coding loop\'s review checkpoint)', async () => {
+  const { githubOpenPr } = await import('../src/github.js')
+  const { getPreference: readPref } = await import('../src/memory.js')
+  const token = readPref<string>(db, 'github_token')
+
+  const result = await githubOpenPr(token, {
+    owner: 'octo-owner',
+    repo: 'yahalla-ai-os',
+    title: 'Fix the bug',
+    head: 'fix/bug',
+    base: 'main',
+    body: 'Diagnosed and fixed, verified with npm test.',
+  })
+  assert.equal(result.success, true)
+  assert.equal((result as any).pull_request.number, 42)
+  assert.equal((result as any).pull_request.html_url, 'https://github.com/octo-owner/yahalla-ai-os/pull/42')
+  assert.equal((result as any).pull_request.head, 'fix/bug')
+  assert.equal((result as any).pull_request.base, 'main')
+
+  const { getTool } = await import('../src/tools.js')
+  assert.equal(getTool('github.open_pr')!.requiresApproval, false)
+})
+
+test('githubOpenPr rejects a missing required field with a clear error, not a crash', async () => {
+  const { githubOpenPr } = await import('../src/github.js')
+  const result = await githubOpenPr('good-token', { owner: 'octo-owner', repo: 'yahalla-ai-os', title: 'Fix' })
+  assert.equal(result.success, false)
+  assert.match((result as any).message, /required/)
 })
 
 test('disconnecting clears the stored token and username', async () => {

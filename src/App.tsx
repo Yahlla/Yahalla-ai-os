@@ -1746,6 +1746,13 @@ type ChatMessage = {
   attachments?: { name: string; size: number }[]
   imageDataUrl?: string
   viaCloudBoost?: string
+  // Set when this reply is local-runtime pausing on a still-approval-gated
+  // tool (github.write's create_repo, db_execute -- see tools.ts). 'pending'
+  // shows the inline Approve/Reject card; 'approved'/'rejected' record what
+  // the user decided so the card doesn't linger after the fact.
+  approvalId?: string
+  approvalTool?: string
+  approvalDecision?: 'pending' | 'approved' | 'rejected'
 }
 
 // The cloud smart tier gets no system prompt at all otherwise -- a raw
@@ -2743,7 +2750,9 @@ function ChatSection() {
       const assistantContent =
         result.answer ||
         result.error ||
-        'Yahalla AI Core did not return an answer.'
+        (result.approval_required
+          ? `Waiting for your approval to run ${result.approval_tool ?? 'a sensitive action'} -- see below.`
+          : 'Yahalla AI Core did not return an answer.')
 
       const finalMessageId = streamingMessageId ?? crypto.randomUUID()
 
@@ -2769,6 +2778,9 @@ function ChatSection() {
           toolActivity: result.executed_tools as { tool: string; result: Record<string, unknown> }[],
           error: !result.success,
           viaCloudBoost: usedCloudBoostModel,
+          approvalId: result.approval_required ? result.tool_execution_id : undefined,
+          approvalTool: result.approval_required ? result.approval_tool : undefined,
+          approvalDecision: result.approval_required ? 'pending' : undefined,
         }
         setMessages((prev) => [...prev, assistantMessage])
       }
@@ -2825,6 +2837,46 @@ function ChatSection() {
       setSending(false)
       setModelLoadProgress(null)
       setTimeout(() => textareaRef.current?.focus(), 50)
+    }
+  }
+
+  // Handles the two remaining approval-gated tools (github.write's
+  // create_repo, db_execute -- see local-runtime/src/tools.ts): local-
+  // runtime already exposes /approvals/:id/decide, this is just the chat
+  // UI actually calling it, which nothing did before (see task #88).
+  const [decidingApprovalId, setDecidingApprovalId] = useState<string | null>(null)
+
+  async function handleApprovalDecision(messageId: string, approvalId: string, decision: 'approve' | 'reject') {
+    setDecidingApprovalId(approvalId)
+    try {
+      const result = await localRuntime.decideApproval(approvalId, decision)
+      const content =
+        result.answer ||
+        result.error ||
+        (decision === 'reject' ? 'Rejected.' : 'Approved.')
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                content,
+                error: !result.success,
+                toolActivity: (result.executed_tools as { tool: string; result: Record<string, unknown> }[]) ?? m.toolActivity,
+                approvalDecision: decision === 'approve' ? 'approved' : 'rejected',
+              }
+            : m,
+        ),
+      )
+    } catch (err) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId
+            ? { ...m, content: `تعذر تنفيذ القرار: ${err instanceof Error ? err.message : 'خطأ غير معروف'}`, error: true }
+            : m,
+        ),
+      )
+    } finally {
+      setDecidingApprovalId(null)
     }
   }
 
@@ -2990,6 +3042,39 @@ function ChatSection() {
                   <div className={`message-bubble ${message.error ? 'message-error' : ''} ${message.id === streamingMessageId ? 'streaming' : ''}`}>
                     {message.content}
                   </div>
+                  {message.approvalId && message.approvalDecision === 'pending' && (
+                    <div className="data-card approval-inline-card">
+                      <div className="data-card-header">
+                        <div className="data-card-icon"><ShieldCheck size={16} /></div>
+                        <div className="data-card-title">
+                          <div className="data-card-name">Approval needed</div>
+                          <div className="data-card-sub">{message.approvalTool}</div>
+                        </div>
+                      </div>
+                      <div className="data-card-actions">
+                        <button
+                          className="mini-button approve"
+                          disabled={decidingApprovalId === message.approvalId}
+                          onClick={() => handleApprovalDecision(message.id, message.approvalId!, 'approve')}
+                        >
+                          <Check size={14} /> Approve
+                        </button>
+                        <button
+                          className="mini-button reject"
+                          disabled={decidingApprovalId === message.approvalId}
+                          onClick={() => handleApprovalDecision(message.id, message.approvalId!, 'reject')}
+                        >
+                          <X size={14} /> Reject
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {message.approvalId && message.approvalDecision && message.approvalDecision !== 'pending' && (
+                    <div className="task-chip">
+                      <ShieldCheck size={12} />
+                      {message.approvalDecision === 'approved' ? 'Approved' : 'Rejected'}
+                    </div>
+                  )}
                   {message.viaCloudBoost && (
                     <div className="task-chip cloud-boost-chip" title="Answered by the opt-in cloud smart tier -- this message left your device.">
                       <Sparkles size={12} />

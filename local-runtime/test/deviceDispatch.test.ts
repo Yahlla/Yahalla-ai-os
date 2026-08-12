@@ -15,9 +15,10 @@ import { PerceptionManager } from '../src/perception/manager.js'
 import { startTaskPoller } from '../src/taskPoller.js'
 import { pairDevice } from '../src/devicePairing.js'
 
-// A fake OpenAI-compatible local LLM: a message containing "write" asks for
-// write_project_file (which always requires approval, see tools.ts) on
-// round 1; any other message answers directly with no tool call.
+// A fake OpenAI-compatible local LLM: a message containing "create a repo"
+// asks for github.write (the one GitHub action still gated behind
+// approval, see tools.ts) on round 1; any other message answers directly
+// with no tool call.
 function startFakeLlm(port: number): Promise<Server> {
   const server = createFakeHttpServer(async (req, res) => {
     if (req.url === '/v1/chat/completions' && req.method === 'POST') {
@@ -32,7 +33,7 @@ function startFakeLlm(port: number): Promise<Server> {
         res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Done.' } }] }))
         return
       }
-      if (String(lastUser?.content ?? '').includes('write')) {
+      if (String(lastUser?.content ?? '').includes('create a repo')) {
         res.end(
           JSON.stringify({
             choices: [
@@ -41,7 +42,7 @@ function startFakeLlm(port: number): Promise<Server> {
                   role: 'assistant',
                   content: null,
                   tool_calls: [
-                    { id: 'call_1', type: 'function', function: { name: 'write_project_file', arguments: JSON.stringify({ path: 'output.txt', content: 'hi' }) } },
+                    { id: 'call_1', type: 'function', function: { name: 'github.write', arguments: JSON.stringify({ operation: 'create_repo', name: 'new-project' }) } },
                   ],
                 },
               },
@@ -51,6 +52,21 @@ function startFakeLlm(port: number): Promise<Server> {
         return
       }
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'The answer is 4.' } }] }))
+      return
+    }
+    res.writeHead(404)
+    res.end()
+  })
+  return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve(server)))
+}
+
+// Stands in for api.github.com, just for the github.write(create_repo)
+// approval-gate test.
+function startFakeGithub(port: number): Promise<Server> {
+  const server = createFakeHttpServer(async (req, res) => {
+    if (req.url === '/user/repos' && req.method === 'POST') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ name: 'new-project', full_name: 'octo-owner/new-project', private: true, html_url: 'https://github.com/octo-owner/new-project' }))
       return
     }
     res.writeHead(404)
@@ -215,7 +231,13 @@ test('the poller claims a queued task, runs it through the real agent loop, and 
 test('a task that hits an approval gate is only reported once the device owner decides locally', async () => {
   const dbInstance = openDb(':memory:')
   grantPermission(dbInstance, 'project', projectDir, 'write')
+  grantPermission(dbInstance, 'network', '*', 'write')
+  const { setPreference } = await import('../src/memory.js')
+  setPreference(dbInstance, 'github_token', 'fake-token')
+
   fakeLlm = await startFakeLlm(18097)
+  const fakeGithub = await startFakeGithub(18100)
+  process.env.GITHUB_API_BASE_URL = 'http://127.0.0.1:18100'
   const platformApi = await startFakePlatformApi(18098, { expectedCode: 'CODE3', deviceToken: 'device-token-3' })
   try {
     const ctx = buildCtx(dbInstance, 18097)
@@ -227,7 +249,7 @@ test('a task that hits an approval gate is only reported once the device owner d
       platformApiUrl: 'http://127.0.0.1:18098',
       deviceToken: 'device-token-3',
     }
-    platformApi.setNextTask({ id: 'task-needs-approval', title: 'please write output.txt', description: null })
+    platformApi.setNextTask({ id: 'task-needs-approval', title: 'create a repo for this', description: null })
 
     const stop = startTaskPoller(ctx, config, { pollIntervalMs: 20, heartbeatIntervalMs: 20 })
     try {
@@ -238,7 +260,7 @@ test('a task that hits an approval gate is only reported once the device owner d
       const pending = dbInstance.prepare("SELECT id FROM approvals WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1").get() as
         | { id: string }
         | undefined
-      assert.ok(pending, 'expected a pending local approval row for the gated write')
+      assert.ok(pending, 'expected a pending local approval row for the gated github.write call')
 
       const { resumeApproval } = await import('../src/agentLoop.js')
       await resumeApproval(ctx, pending!.id, 'approve')
@@ -253,6 +275,8 @@ test('a task that hits an approval gate is only reported once the device owner d
   } finally {
     platformApi.server.close()
     fakeLlm.close()
+    fakeGithub.close()
+    delete process.env.GITHUB_API_BASE_URL
   }
 })
 

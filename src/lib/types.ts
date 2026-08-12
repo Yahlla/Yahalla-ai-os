@@ -275,4 +275,5 @@ export type ChatResponse = {
   memory_count?: number
   approval_required?: boolean
   tool_execution_id?: string
+  approval_tool?: string
 }

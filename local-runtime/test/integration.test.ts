@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createServer as createFakeLlmServer } from 'node:http'
+import { createServer as createFakeHttpServer } from 'node:http'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,15 +9,17 @@ import { grantPermission, checkAccess } from '../src/permissions.js'
 import { LocalModelProcess } from '../src/llm.js'
 import { createHttpServer } from '../src/server.js'
 import type { RuntimeConfig } from '../src/config.js'
-import { listMemory } from '../src/memory.js'
+import { listMemory, setPreference } from '../src/memory.js'
 
 // A fake OpenAI-compatible local LLM: round 1 always asks to call
 // read_project_file on README.md, round 2 (once it sees the tool result in
-// the conversation) answers using that content. Also handles a
-// "please write" trigger message that requests write_project_file instead,
-// to exercise the approval-gated path.
+// the conversation) answers using that content. A "please write" trigger
+// requests write_project_file (now non-gated, part of the autonomous
+// coding loop -- see tools.ts), and a "create a repo" trigger requests
+// github.write (create_repo), which is still the one approval-gated
+// GitHub action.
 function startFakeLlm(port: number) {
-  const server = createFakeLlmServer(async (req, res) => {
+  const server = createFakeHttpServer(async (req, res) => {
     if (req.url === '/v1/models') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ data: [{ id: 'fake-model' }] }))
@@ -64,6 +66,29 @@ function startFakeLlm(port: number) {
         return
       }
 
+      if (String(lastUser?.content ?? '').includes('create a repo')) {
+        res.end(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: 'call_repo_1',
+                      type: 'function',
+                      function: { name: 'github.write', arguments: JSON.stringify({ operation: 'create_repo', name: 'new-project' }) },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        )
+        return
+      }
+
       res.end(
         JSON.stringify({
           choices: [
@@ -91,9 +116,29 @@ function startFakeLlm(port: number) {
   return new Promise<import('node:http').Server>((resolve) => server.listen(port, '127.0.0.1', () => resolve(server)))
 }
 
+// Stands in for api.github.com, just for the still approval-gated
+// github.write(create_repo) path -- validates the bearer token and records
+// whether a repo-creation request actually landed, so the test can prove
+// the real API call only happens after approval, not before.
+let githubCreateRepoCalls = 0
+function startFakeGithub(port: number) {
+  const server = createFakeHttpServer(async (req, res) => {
+    if (req.url === '/user/repos' && req.method === 'POST') {
+      githubCreateRepoCalls++
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ name: 'new-project', full_name: 'octo-owner/new-project', private: true, html_url: 'https://github.com/octo-owner/new-project' }))
+      return
+    }
+    res.writeHead(404)
+    res.end()
+  })
+  return new Promise<import('node:http').Server>((resolve) => server.listen(port, '127.0.0.1', () => resolve(server)))
+}
+
 let projectDir: string
 let db: Db
 let fakeLlm: import('node:http').Server
+let fakeGithub: import('node:http').Server
 let httpServer: import('node:http').Server
 let baseUrl: string
 let authToken = 'test-token'
@@ -104,8 +149,12 @@ before(async () => {
 
   db = openDb(':memory:')
   grantPermission(db, 'project', projectDir, 'write')
+  grantPermission(db, 'network', '*', 'write')
+  setPreference(db, 'github_token', 'fake-token')
 
   fakeLlm = await startFakeLlm(18081)
+  fakeGithub = await startFakeGithub(18083)
+  process.env.GITHUB_API_BASE_URL = 'http://127.0.0.1:18083'
 
   const modelProcess = new LocalModelProcess(18081)
   // Force isRunning()/baseUrl to point at our fake server without actually
@@ -130,6 +179,8 @@ before(async () => {
 after(async () => {
   httpServer.close()
   fakeLlm.close()
+  fakeGithub.close()
+  delete process.env.GITHUB_API_BASE_URL
   rmSync(projectDir, { recursive: true, force: true })
 })
 
@@ -178,26 +229,35 @@ test('chat persists conversation messages and local memory', async () => {
   assert.ok(listMemory(db).length >= 1)
 })
 
-test('chat: dangerous tool pauses for approval and does not execute yet', async () => {
+test('chat: write_project_file executes immediately, no approval needed (autonomous coding loop)', async () => {
   const { body } = await api('/chat', { method: 'POST', body: JSON.stringify({ message: 'please write a file' }) })
-  assert.equal(body.status, 'waiting_approval')
-  assert.equal(body.approvalTool, 'write_project_file')
-
-  const { existsSync } = await import('node:fs')
-  assert.equal(existsSync(join(projectDir, 'output.txt')), false)
-})
-
-test('approving the pending approval actually executes the write and completes the task', async () => {
-  const { body: approvals } = await api('/approvals')
-  const pending = approvals.approvals.find((a: any) => a.status === 'pending')
-  assert.ok(pending, 'expected a pending approval')
-
-  const { body } = await api(`/approvals/${pending.id}/decide`, { method: 'POST', body: JSON.stringify({ decision: 'approve' }) })
   assert.equal(body.status, 'completed')
+  assert.equal(body.executedTools[0].tool, 'write_project_file')
+  assert.equal(body.executedTools[0].result.success, true)
 
   const { readFileSync, existsSync } = await import('node:fs')
   assert.equal(existsSync(join(projectDir, 'output.txt')), true)
   assert.equal(readFileSync(join(projectDir, 'output.txt'), 'utf8'), 'hello')
+})
+
+test('chat: github.write (create_repo) still pauses for approval and does not call GitHub yet', async () => {
+  const before = githubCreateRepoCalls
+  const { body } = await api('/chat', { method: 'POST', body: JSON.stringify({ message: 'create a repo for this' }) })
+  assert.equal(body.status, 'waiting_approval')
+  assert.equal(body.approvalTool, 'github.write')
+  assert.equal(githubCreateRepoCalls, before, 'GitHub must not be called before approval')
+})
+
+test('approving the pending github.write approval actually calls the real GitHub API', async () => {
+  const before = githubCreateRepoCalls
+  const { body: approvals } = await api('/approvals')
+  const pending = approvals.approvals.find((a: any) => a.status === 'pending')
+  assert.ok(pending, 'expected a pending approval')
+  assert.equal(pending.tool_key, 'github.write')
+
+  const { body } = await api(`/approvals/${pending.id}/decide`, { method: 'POST', body: JSON.stringify({ decision: 'approve' }) })
+  assert.equal(body.status, 'completed')
+  assert.equal(githubCreateRepoCalls, before + 1, 'expected exactly one real call to the fake GitHub server')
 })
 
 test('knowledge persists locally and is readable back', async () => {
@@ -222,27 +282,19 @@ test('skills/procedures persist locally', async () => {
   assert.equal(skill!.success_count, 1)
 })
 
-test('revoked project permission blocks tool execution even for an approved action', async () => {
+test('revoked project permission blocks a write from executing, inline, with a clear denial', async () => {
   const { revokePermission } = await import('../src/permissions.js')
   revokePermission(db, 'project', projectDir)
 
+  // write_project_file is no longer approval-gated (see tools.ts), so a
+  // revoked permission must now be caught inline, at execution time --
+  // the chat still completes (the model sees the denial and can react to
+  // it), it just never touches the filesystem.
   const chat = await api('/chat', { method: 'POST', body: JSON.stringify({ message: 'please write a file' }) })
-  assert.equal(chat.body.status, 'waiting_approval')
+  assert.equal(chat.body.status, 'completed')
+  assert.equal(chat.body.executedTools[0].tool, 'write_project_file')
+  assert.equal(chat.body.executedTools[0].result.success, false)
+  assert.match(chat.body.executedTools[0].result.error, /Permission denied/)
 
-  const { body: approvals } = await api('/approvals')
-  const pending = approvals.approvals.find((a: any) => a.status === 'pending')
-
-  const decided = await api(`/approvals/${pending.id}/decide`, { method: 'POST', body: JSON.stringify({ decision: 'approve' }) })
-  // The approval succeeds as an *approval*, but the tool result inside it
-  // must reflect the permission denial -- approval and permission are
-  // independent gates.
-  assert.equal(decided.status, 200)
-
-  const { body: approvalsAfter } = await api('/approvals')
-  const decidedApproval = approvalsAfter.approvals.find((a: any) => a.id === pending.id)
-  assert.equal(decidedApproval.status, 'approved')
-
-  const toolResult = JSON.parse(decidedApproval.result)
-  assert.equal(toolResult.success, false)
-  assert.match(toolResult.error, /Permission denied/)
+  grantPermission(db, 'project', projectDir, 'write')
 })

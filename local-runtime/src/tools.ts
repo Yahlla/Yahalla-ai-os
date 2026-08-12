@@ -38,8 +38,8 @@ export const TOOLS: ToolDef[] = [
   {
     key: 'write_project_file',
     category: 'files',
-    requiresApproval: true,
-    description: 'Create or overwrite a file in the project workspace. Requires approval.',
+    requiresApproval: false,
+    description: 'Create or overwrite a file in the project workspace. Not approval-gated -- the review checkpoint for code changes is the pull request opened with github.open_pr, not each individual write.',
     parameters: {
       type: 'object',
       properties: {
@@ -54,8 +54,8 @@ export const TOOLS: ToolDef[] = [
   {
     key: 'patch_project_file',
     category: 'files',
-    requiresApproval: true,
-    description: 'Replace an exact, unique block of text in an existing file. old_text must be copied verbatim from a prior read_project_file result. Requires approval.',
+    requiresApproval: false,
+    description: 'Replace an exact, unique block of text in an existing file. old_text must be copied verbatim from a prior read_project_file result. Not approval-gated -- see write_project_file.',
     parameters: {
       type: 'object',
       properties: {
@@ -107,8 +107,8 @@ export const TOOLS: ToolDef[] = [
   {
     key: 'git_commit',
     category: 'system',
-    requiresApproval: true,
-    description: 'Stage all changes and create a git commit. Requires approval.',
+    requiresApproval: false,
+    description: 'Stage all changes and create a git commit. Not approval-gated -- commit freely on a branch, the review checkpoint is the pull request (github.open_pr).',
     parameters: {
       type: 'object',
       properties: { message: { type: 'string', description: 'Commit message.' } },
@@ -120,8 +120,8 @@ export const TOOLS: ToolDef[] = [
   {
     key: 'git_push',
     category: 'system',
-    requiresApproval: true,
-    description: 'Push the current (or given) branch to the "origin" remote, using whatever git credentials are already configured on this machine. Requires approval.',
+    requiresApproval: false,
+    description: 'Push the current (or given) branch to the "origin" remote, using whatever git credentials are already configured on this machine. Not approval-gated -- push a feature branch freely, then open a pull request (github.open_pr) rather than pushing straight to a default/production branch.',
     parameters: {
       type: 'object',
       properties: {
@@ -135,8 +135,8 @@ export const TOOLS: ToolDef[] = [
   {
     key: 'run_project_command',
     category: 'system',
-    requiresApproval: true,
-    description: 'Run an allowlisted command (see the tool configuration) in the project directory. Requires approval.',
+    requiresApproval: false,
+    description: 'Run an allowlisted command (see the tool configuration) in the project directory -- e.g. running the test/build/lint suite to verify a change. Not approval-gated: the allowlist itself is the safety boundary.',
     parameters: {
       type: 'object',
       properties: { command: { type: 'string', description: 'One of the exact allowlisted command strings (e.g. "npm run build").' } },
@@ -175,6 +175,26 @@ export const TOOLS: ToolDef[] = [
         description: { type: 'string' },
       },
       required: ['operation', 'name'],
+      additionalProperties: false,
+    },
+    permission: { scope: 'network', access: 'write' },
+  },
+  {
+    key: 'github.open_pr',
+    category: 'github',
+    requiresApproval: false,
+    description: 'Open a pull request on GitHub. This IS the human review checkpoint for a code change -- call it once a fix/feature is committed (git_commit) and pushed to its own branch (git_push), instead of asking for approval on every file write/commit/push. Never merges anything; merging stays a manual human action.',
+    parameters: {
+      type: 'object',
+      properties: {
+        owner: { type: 'string', description: 'Repository owner.' },
+        repo: { type: 'string', description: 'Repository name.' },
+        title: { type: 'string' },
+        body: { type: 'string', description: 'PR description -- summarize what changed, why, and what you verified (tests run, output).' },
+        head: { type: 'string', description: 'Branch containing the changes, already pushed via git_push.' },
+        base: { type: 'string', description: 'Branch to merge into. Defaults to "main".' },
+      },
+      required: ['owner', 'repo', 'title', 'head'],
       additionalProperties: false,
     },
     permission: { scope: 'network', access: 'write' },

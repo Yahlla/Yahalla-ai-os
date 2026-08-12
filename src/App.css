@@ -1610,6 +1610,11 @@ button {
   font-size: 8px;
 }
 
+.approval-inline-card {
+  margin-top: 8px;
+  max-width: 360px;
+}
+
 .tool-activity {
   display: flex;
   flex-wrap: wrap;

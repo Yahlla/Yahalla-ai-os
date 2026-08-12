@@ -3,7 +3,7 @@ import { listDatabaseConnections, queryDatabase, executeDatabase } from './datab
 import type { Db } from './db.js'
 import { newId } from './db.js'
 import type { EmbodimentStateMachine } from './embodiment/stateMachine.js'
-import { githubRead, githubWrite } from './github.js'
+import { githubOpenPr, githubRead, githubWrite } from './github.js'
 import { chatCompletion } from './llm.js'
 import { addMemory, getPreference, recordTaskFeedback } from './memory.js'
 import { checkAccess } from './permissions.js'
@@ -48,12 +48,12 @@ Evidence and verification -- hard rules:
 - If a tool call fails or is unavailable, say so plainly ("I could not verify this -- <reason>"). Do not paper over it with a guess.
 - Never say a task is done, fixed, or succeeded without a tool result that actually proves it. A file write is not "done" until you have read it back or diffed it; a fix is not "done" until the relevant test/build command has actually been run and passed.
 
-Coding-agent workflow for any request that touches the project:
-1. Analyze the request. 2. Inspect the project for real (list_project_files / read_project_file) before assuming anything. 3. Plan the change. 4. Execute it (write_project_file / patch_project_file) -- old_text must be copied verbatim from a read you just did. 5. Verify by reading the file back or using git_diff. 6. Run the relevant test/build command (run_project_command) when one applies. 7. If it fails, diagnose the real output, fix it, and re-run the same command. Repeat until it passes or you have a concrete, evidence-based reason it cannot. 8. Only then report the outcome, citing what you actually verified.
+Coding-agent workflow for any request that touches the project. You are autonomous through this entire sequence -- no step here pauses for approval, so work it end-to-end without asking the user to confirm each action:
+1. Analyze the request. 2. Inspect the project for real (list_project_files / read_project_file) before assuming anything. 3. Plan the change -- for anything non-trivial, create a branch first (git_create_branch). 4. Execute it (write_project_file / patch_project_file) -- old_text must be copied verbatim from a read you just did. 5. Verify by reading the file back or using git_diff. 6. Run the relevant test/build command (run_project_command) when one applies. 7. If it fails, diagnose the real output, fix it, and re-run the same command. Repeat until it passes or you have a concrete, evidence-based reason it cannot. 8. Commit (git_commit) and push (git_push) the branch. 9. Open a pull request (github.open_pr) describing what changed, why, and what you verified -- this PR is the human's review checkpoint, not a request for permission first. 10. Report the outcome and the PR link, citing what you actually verified.
 
-Git and GitHub: git_status/git_diff are read-only and safe to use freely. git_commit, git_push, and github.write are sensitive and require the user's approval -- the platform enforces this automatically; just call the tool, never ask the user to run commands themselves, and never fabricate a commit hash, repo URL, or push result.
+Git and GitHub: git_status/git_diff/git_create_branch/git_commit/git_push/github.open_pr are all free to use without asking -- call them directly as part of the workflow above, never ask the user to run a command themselves, and never fabricate a commit hash, repo URL, PR number, or push result. github.write (creating a brand-new repository, not a PR) is the one GitHub action that still requires the user's approval -- the platform enforces this automatically, just call the tool and wait.
 
-Databases: call db_list_connections first if you don't already know a connection's id. db_query is read-only (enforced by the database itself, not just convention) and safe to use freely for inspecting data/schema. db_execute runs writes/DDL and requires the user's approval -- call it directly, never ask the user to run SQL themselves, and never fabricate query results or row counts.
+Databases: call db_list_connections first if you don't already know a connection's id. db_query is read-only (enforced by the database itself, not just convention) and safe to use freely for inspecting data/schema, debugging, and diagnostics. db_execute runs writes/DDL and requires the user's approval -- call it directly, never ask the user to run SQL themselves, and never fabricate query results or row counts.
 ${perceptionContext ? `\n${perceptionContext}\n` : ''}
 Be concise and useful. Respond in the user's language.
 `.trim()
@@ -104,6 +104,8 @@ function summarizeToolCall(tool: ToolDef, args: Record<string, unknown>): string
       return 'Checking GitHub repositories'
     case 'github.write':
       return 'Creating GitHub repository'
+    case 'github.open_pr':
+      return `Opening pull request "${args.title ?? ''}"`
     case 'db_list_connections':
       return 'Listing connected databases'
     case 'db_query':
@@ -142,7 +144,9 @@ async function executeToolNow(
 
   if (tool.category === 'github') {
     const token = getPreference<string>(ctx.db, 'github_token')
-    return tool.key === 'github.read' ? githubRead(token, args) : githubWrite(token, args)
+    if (tool.key === 'github.read') return githubRead(token, args)
+    if (tool.key === 'github.open_pr') return githubOpenPr(token, args)
+    return githubWrite(token, args)
   }
 
   if (tool.category === 'database') {
