@@ -138,6 +138,27 @@ The first person to ever sign in becomes the platform owner automatically
 (the same `handle_new_user` rule the Supabase-hosted deployment already
 uses) -- no separate admin-creation step.
 
+Proposals get queued one of two ways:
+
+- **"Ship latest main" button** (Deployments page) -- fetches the real
+  latest commit on `main` and proposes it on demand. Always available, no
+  extra setup.
+- **GitHub push webhook** (`POST /webhooks/github`, `api/src/deployments.ts`)
+  -- the permanent, zero-click version: every push to `main` auto-queues a
+  proposal on its own, no admin has to remember to click the button. Set
+  `GITHUB_WEBHOOK_SECRET` in `platform/.env`, then on the repo's GitHub page
+  go to **Settings -> Webhooks -> Add webhook**: Payload URL
+  `https://<your-domain>/webhooks/github`, content type
+  `application/json`, secret = the same value, event = "Just the push
+  event". Approving still always requires one human click either way --
+  this only automates the proposing, never the shipping.
+
+Note: because this webhook route ships as code, a server that predates it
+needs one manual `git pull && docker compose --env-file .env up -d --build`
+(from the same directory `setup-strato.sh` set up) to pick it up in the
+first place -- the one unavoidable exception to "no terminal after setup",
+needed exactly once per feature that upgrades the deploy mechanism itself.
+
 ## Local verification
 
 `db/apply.sh`, `api/`, and `deploy-agent/` each have real tests that run

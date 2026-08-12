@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { callCloudTier, resolveCloudTierConfig, type CloudTierConfig } from './cloudTier.js'
-import { getPool, withUserSession } from './db.js'
-import { fetchCompareDiff, fetchLatestMainCommit } from './deployments.js'
+import { getPool, withServiceRole, withUserSession } from './db.js'
+import { proposeLatestDeployment, verifyGithubWebhookSignature } from './deployments.js'
 import { verifyJwt } from './jwt.js'
 import { toVectorLiteral, validateEmbedding } from './memory.js'
 import { authenticateDevice, createPairingCode, ensureHumanUser, exchangePairingCode, recordHeartbeat } from './pairing.js'
@@ -17,20 +17,29 @@ export type PlatformConfig = {
   supabaseUrl?: string
   allowedOrigins: string[]
   cloudTier: CloudTierConfig | null
-  // owner/repo used by POST /deployments/propose_latest to fetch the real
-  // latest-main commit + diff from GitHub's public API. Defaults to this
-  // project's own repo.
+  // owner/repo used by POST /deployments/propose_latest and the push
+  // webhook to fetch the real latest-main commit + diff from GitHub's
+  // public API. Defaults to this project's own repo.
   githubRepo?: string
+  // Secret configured on the GitHub repo's webhook (Settings -> Webhooks).
+  // Required to accept POST /webhooks/github -- without it the endpoint
+  // stays disabled (404) rather than accepting unverifiable requests.
+  githubWebhookSecret?: string
 }
 
 type Identity = { userId: string; kind: 'human' | 'device' }
 
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readRawBody(req: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = []
   for await (const chunk of req) chunks.push(chunk as Buffer)
-  if (chunks.length === 0) return {}
+  return Buffer.concat(chunks)
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const raw = await readRawBody(req)
+  if (raw.length === 0) return {}
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    return JSON.parse(raw.toString('utf8'))
   } catch {
     return {}
   }
@@ -106,6 +115,48 @@ export function createPlatformServer(config: PlatformConfig) {
           String(body.platform ?? 'other'),
         )
         return send(res, 200, { success: true, device_id: result.deviceId, device_name: result.deviceName, token: result.token })
+      }
+
+      // GitHub calls this directly on every push -- it has no Supabase JWT
+      // or device pairing token, so it can't go through resolveIdentity like
+      // every other route below. Its only credential is the HMAC signature
+      // GitHub computes over the raw body with the shared webhook secret
+      // (verifyGithubWebhookSignature), which is why the body must be read
+      // as raw bytes here rather than via readJsonBody. This is the
+      // permanent replacement for manually clicking "Ship latest main":
+      // every push to main now queues a pending proposal on its own: a
+      // human still has to click Approve & Ship, same as any other
+      // proposal, so nothing reaches live production without that click.
+      if (path === '/webhooks/github' && req.method === 'POST') {
+        if (!config.githubWebhookSecret) {
+          return send(res, 404, { success: false, error: 'GitHub webhook not configured on this deployment.' })
+        }
+        const raw = await readRawBody(req)
+        const signature = req.headers['x-hub-signature-256']
+        if (!verifyGithubWebhookSignature(raw, typeof signature === 'string' ? signature : undefined, config.githubWebhookSecret)) {
+          return send(res, 401, { success: false, error: 'Invalid webhook signature.' })
+        }
+
+        const event = req.headers['x-github-event']
+        let payload: { ref?: string }
+        try {
+          payload = JSON.parse(raw.toString('utf8'))
+        } catch {
+          return send(res, 400, { success: false, error: 'Invalid JSON payload.' })
+        }
+
+        if (event !== 'push' || payload.ref !== 'refs/heads/main') {
+          return send(res, 200, { success: true, ignored: true })
+        }
+
+        const githubRepo = config.githubRepo ?? 'Yahlla/Yahalla-ai-os'
+        const result = await withServiceRole((client) =>
+          proposeLatestDeployment(githubRepo, (text, params) => client.query(text, params), null, 'github-webhook'),
+        )
+        if (result.outcome === 'github_unreachable') {
+          return send(res, 502, { success: false, error: `Could not reach GitHub to check the latest commit on ${result.repo}.` })
+        }
+        return send(res, 200, { success: true, ...result })
       }
 
       const identity = await resolveIdentity(req, config)
@@ -295,35 +346,16 @@ export function createPlatformServer(config: PlatformConfig) {
         if (identity.kind !== 'human') return send(res, 403, { success: false, error: 'Only a human can propose a deployment.' })
 
         const githubRepo = config.githubRepo ?? 'Yahlla/Yahalla-ai-os'
-        const latest = await fetchLatestMainCommit(githubRepo)
-        if (!latest) return send(res, 502, { success: false, error: `Could not reach GitHub to check the latest commit on ${githubRepo}.` })
-
-        const priorDeployed = await withUserSession(identity.userId, (client) =>
-          client.query("SELECT git_ref FROM deployment_proposals WHERE status = 'deployed' ORDER BY deployed_at DESC LIMIT 1"),
+        const result = await withUserSession(identity.userId, (client) =>
+          proposeLatestDeployment(githubRepo, (text, params) => client.query(text, params), identity.userId, null),
         )
-        const baseRef = priorDeployed.rows[0]?.git_ref as string | undefined
-
-        if (baseRef === latest.sha) {
+        if (result.outcome === 'github_unreachable') {
+          return send(res, 502, { success: false, error: `Could not reach GitHub to check the latest commit on ${result.repo}.` })
+        }
+        if (result.outcome === 'up_to_date') {
           return send(res, 200, { success: true, up_to_date: true, message: 'Already up to date -- the last deployment already shipped this exact commit.' })
         }
-
-        const diff = baseRef ? await fetchCompareDiff(githubRepo, baseRef, latest.sha) : null
-
-        const created = await withUserSession(identity.userId, (client) =>
-          client.query(
-            `INSERT INTO deployment_proposals (title, description, git_ref, base_ref, diff, proposed_by)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-            [
-              `Ship latest main (${latest.sha.slice(0, 7)})`,
-              latest.message.slice(0, 500),
-              latest.sha,
-              baseRef ?? latest.sha,
-              diff ?? `No prior deployment on record to diff against -- this proposal ships commit ${latest.sha} on main.\n\n${latest.message}`,
-              identity.userId,
-            ],
-          ),
-        )
-        return send(res, 200, { success: true, deployment: created.rows[0] })
+        return send(res, 200, { success: true, deployment: result.deployment })
       }
 
       const deploymentMatch = path.match(/^\/deployments\/([^/]+)\/decide$/)

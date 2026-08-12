@@ -8,6 +8,7 @@ const supabaseUrl = process.env.SUPABASE_URL || undefined
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
 const cloudTier = loadCloudTierConfig(process.env)
 const githubRepo = process.env.GITHUB_REPO || 'Yahlla/Yahalla-ai-os'
+const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET || undefined
 
 // Supabase projects sign tokens with HS256 (needs SUPABASE_JWT_SECRET) or
 // ES256 (needs SUPABASE_URL, to fetch the project's public JWKS) -- see
@@ -26,8 +27,13 @@ if (cloudTier) {
 } else {
   console.log('[platform-api] cloud smart tier disabled (CLOUD_TIER_API_KEY not set)')
 }
+if (githubWebhookSecret) {
+  console.log('[platform-api] GitHub push webhook enabled: POST /webhooks/github')
+} else {
+  console.log('[platform-api] GitHub push webhook disabled (GITHUB_WEBHOOK_SECRET not set) -- "Ship latest main" still works manually')
+}
 
-const server = createPlatformServer({ port, supabaseJwtSecret, supabaseUrl, allowedOrigins, cloudTier, githubRepo })
+const server = createPlatformServer({ port, supabaseJwtSecret, supabaseUrl, allowedOrigins, cloudTier, githubRepo, githubWebhookSecret })
 
 server.listen(port, () => {
   console.log(`[platform-api] listening on :${port}`)

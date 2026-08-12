@@ -72,6 +72,18 @@ services:
       CLOUD_TIER_API_KEY: ${CLOUD_TIER_API_KEY:-}
       CLOUD_TIER_URL: ${CLOUD_TIER_URL:-https://api.groq.com/openai/v1}
       CLOUD_TIER_MODEL: ${CLOUD_TIER_MODEL:-llama-3.3-70b-versatile}
+      # owner/repo backing both the "Ship latest main" button and the push
+      # webhook below (api/src/deployments.ts) -- defaults to this project's
+      # own repo, only needs setting for a fork.
+      GITHUB_REPO: ${GITHUB_REPO:-Yahlla/Yahalla-ai-os}
+      # Set this and add a webhook on the GitHub repo (Settings -> Webhooks
+      # -> Add webhook -> Payload URL: https://<your-domain>/webhooks/github,
+      # content type application/json, same secret, "Just the push event")
+      # to auto-queue a deployment proposal on every push to main -- the
+      # permanent replacement for clicking "Ship latest main" by hand.
+      # Leave unset and the endpoint stays disabled (404); the button keeps
+      # working manually either way.
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
     mem_limit: 256m
     cpus: 0.5
 

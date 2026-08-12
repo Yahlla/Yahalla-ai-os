@@ -42,6 +42,14 @@ let fakeUpstream: import('node:http').Server
 let fakeUpstreamPort: number
 let fakeUpstreamBehavior: 'ok' | 'upstream-error' = 'ok'
 
+// A third server instance with the GitHub webhook secret configured --
+// separate from httpServer (which intentionally has none, to prove the
+// endpoint stays disabled without one) the same way cloudTierServer is
+// separate from the plain one above.
+const WEBHOOK_SECRET = 'test-webhook-secret'
+let webhookServer: import('node:http').Server
+let webhookBaseUrl: string
+
 before(async () => {
   process.env.DATABASE_URL = process.env.TEST_DATABASE_URL
   if (!process.env.DATABASE_URL) throw new Error('TEST_DATABASE_URL must be set to run these tests.')
@@ -82,12 +90,20 @@ before(async () => {
   const cloudAddress = cloudTierServer.address()
   const cloudPort = typeof cloudAddress === 'object' && cloudAddress ? cloudAddress.port : 0
   cloudTierBaseUrl = `http://127.0.0.1:${cloudPort}`
+
+  const webhookSrv = createPlatformServer({ port: 0, supabaseJwtSecret: JWT_SECRET, allowedOrigins: [], cloudTier: null, githubWebhookSecret: WEBHOOK_SECRET })
+  webhookServer = webhookSrv
+  await new Promise<void>((resolve) => webhookServer.listen(0, '127.0.0.1', () => resolve()))
+  const webhookAddress = webhookServer.address()
+  const webhookPort = typeof webhookAddress === 'object' && webhookAddress ? webhookAddress.port : 0
+  webhookBaseUrl = `http://127.0.0.1:${webhookPort}`
 })
 
 after(async () => {
   httpServer.close()
   cloudTierServer.close()
   fakeUpstream.close()
+  webhookServer.close()
   await closePool()
 })
 
@@ -690,4 +706,91 @@ test('an admin saves a cloud-tier key from the settings API and it works immedia
   assert.equal(chat.status, 200)
   assert.equal(chat.body.content, 'fake 70B reply')
   assert.equal(chat.body.model, 'db-model')
+})
+
+// GitHub push webhook: the permanent replacement for manually clicking
+// "Ship latest main" -- once configured, every push to main auto-creates a
+// pending proposal on its own (still requiring the normal human Approve &
+// Ship click, same as every other proposal). Uses raw fetch (not the api()
+// helper, which always JSON-stringifies) since the signature is computed
+// over the exact raw bytes GitHub would send.
+
+function pushPayload(ref: string): Buffer {
+  return Buffer.from(JSON.stringify({ ref, head_commit: { id: 'sha-webhook', message: 'Webhook-triggered commit' } }))
+}
+
+function signWebhookPayload(payload: Buffer, secret: string): string {
+  return `sha256=${createHmac('sha256', secret).update(payload).digest('hex')}`
+}
+
+async function webhookApi(base: string, body: Buffer, headers: Record<string, string>): Promise<{ status: number; body: any }> {
+  const response = await fetch(`${base}/webhooks/github`, { method: 'POST', body, headers })
+  return { status: response.status, body: (await response.json()) as any }
+}
+
+test('the webhook endpoint is disabled (404) on a server with no secret configured', async () => {
+  const payload = pushPayload('refs/heads/main')
+  const { status } = await webhookApi(baseUrl, payload, {
+    'Content-Type': 'application/json',
+    'X-GitHub-Event': 'push',
+    'X-Hub-Signature-256': signWebhookPayload(payload, 'irrelevant'),
+  })
+  assert.equal(status, 404)
+})
+
+test('a push to main with a valid signature auto-creates a pending proposal, attributed to the webhook not a human', async () => {
+  await withFakeGithub(
+    (req, res) => {
+      if (req.url === '/repos/Yahlla/Yahalla-ai-os/commits/main') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ sha: 'sha-webhook-push', commit: { message: 'Webhook-triggered commit' } }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      const payload = pushPayload('refs/heads/main')
+      const { status, body } = await webhookApi(webhookBaseUrl, payload, {
+        'Content-Type': 'application/json',
+        'X-GitHub-Event': 'push',
+        'X-Hub-Signature-256': signWebhookPayload(payload, WEBHOOK_SECRET),
+      })
+      assert.equal(status, 200)
+      assert.equal(body.success, true)
+      assert.equal(body.outcome, 'proposed')
+      assert.equal(body.deployment.git_ref, 'sha-webhook-push')
+      assert.equal(body.deployment.status, 'pending')
+      assert.equal(body.deployment.proposed_by, null)
+      assert.equal(body.deployment.proposed_by_agent, 'github-webhook')
+    },
+  )
+})
+
+test('a push webhook with an invalid signature is rejected', async () => {
+  const payload = pushPayload('refs/heads/main')
+  const { status, body } = await webhookApi(webhookBaseUrl, payload, {
+    'Content-Type': 'application/json',
+    'X-GitHub-Event': 'push',
+    'X-Hub-Signature-256': signWebhookPayload(payload, 'wrong-secret'),
+  })
+  assert.equal(status, 401)
+  assert.match(body.error, /signature/)
+})
+
+test('a push webhook with no signature header at all is rejected', async () => {
+  const payload = pushPayload('refs/heads/main')
+  const { status } = await webhookApi(webhookBaseUrl, payload, { 'Content-Type': 'application/json', 'X-GitHub-Event': 'push' })
+  assert.equal(status, 401)
+})
+
+test('a push to a branch other than main is ignored, not proposed', async () => {
+  const payload = pushPayload('refs/heads/feature-branch')
+  const { status, body } = await webhookApi(webhookBaseUrl, payload, {
+    'Content-Type': 'application/json',
+    'X-GitHub-Event': 'push',
+    'X-Hub-Signature-256': signWebhookPayload(payload, WEBHOOK_SECRET),
+  })
+  assert.equal(status, 200)
+  assert.equal(body.ignored, true)
 })
