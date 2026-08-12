@@ -138,6 +138,76 @@ export function createPlatformServer(config: PlatformConfig) {
         return send(res, 200, { tasks: rows.rows })
       }
 
+      // Real device task dispatch: a human creates a task addressed to
+      // their own paired device (auto-picked if they have exactly one
+      // online), the device polls /tasks/next to atomically claim the
+      // oldest queued one assigned to it (FOR UPDATE SKIP LOCKED --safe
+      // even if a device somehow polls twice concurrently), executes it
+      // with its own real file/git/tool access, and reports the result
+      // to /tasks/:id/complete. RLS (assigned_device = current_device_id())
+      // is what actually enforces a device only ever sees/updates its own
+      // tasks -- this handler leans on that rather than re-checking it in
+      // application code.
+      if (path === '/tasks' && req.method === 'POST') {
+        if (identity.kind !== 'human') return send(res, 403, { success: false, error: 'Only a human can create a task.' })
+        const body = await readJsonBody(req)
+        const title = String(body.title ?? '').trim()
+        if (!title) return send(res, 400, { success: false, error: 'title is required.' })
+
+        const outcome = await withUserSession(identity.userId, async (client) => {
+          let deviceId = typeof body.device_id === 'string' ? body.device_id : null
+          if (!deviceId) {
+            const { rows: devices } = await client.query<{ id: string; name: string }>(
+              "SELECT id, name FROM devices WHERE owner_id = $1 AND status = 'online' AND revoked_at IS NULL",
+              [identity.userId],
+            )
+            if (devices.length === 0) {
+              return { error: 'No paired, online device found. Pair a device (Devices page) and make sure it is running.' }
+            }
+            if (devices.length > 1) {
+              return { error: `Multiple online devices -- specify device_id: ${devices.map((d) => `${d.name} (${d.id})`).join(', ')}` }
+            }
+            deviceId = devices[0]!.id
+          }
+          const { rows } = await client.query(
+            `INSERT INTO tasks (title, description, status, requested_by, assigned_device, input)
+             VALUES ($1, $2, 'queued', $3, $4, $5) RETURNING *`,
+            [title, typeof body.description === 'string' ? body.description : null, identity.userId, deviceId, JSON.stringify(body.input ?? {})],
+          )
+          return { task: rows[0] }
+        })
+        if ('error' in outcome) return send(res, 409, { success: false, error: outcome.error })
+        return send(res, 200, { success: true, task: outcome.task })
+      }
+
+      if (path === '/tasks/next' && req.method === 'GET') {
+        if (identity.kind !== 'device') return send(res, 403, { success: false, error: 'Only a paired device can claim tasks.' })
+        const { rows } = await withUserSession(identity.userId, (client) =>
+          client.query(
+            `UPDATE tasks SET status = 'running', started_at = now(), updated_at = now()
+             WHERE id = (SELECT id FROM tasks WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
+             RETURNING *`,
+          ),
+        )
+        return send(res, 200, { task: rows[0] ?? null })
+      }
+
+      const taskCompleteMatch = path.match(/^\/tasks\/([^/]+)\/complete$/)
+      if (taskCompleteMatch && req.method === 'POST') {
+        if (identity.kind !== 'device') return send(res, 403, { success: false, error: 'Only a paired device can complete tasks.' })
+        const body = await readJsonBody(req)
+        const status = body.status === 'failed' ? 'failed' : 'completed'
+        const { rows } = await withUserSession(identity.userId, (client) =>
+          client.query(
+            `UPDATE tasks SET status = $2, output = $3, error = $4, completed_at = now(), updated_at = now()
+             WHERE id = $1 RETURNING *`,
+            [taskCompleteMatch[1], status, JSON.stringify(body.output ?? {}), body.error ? JSON.stringify(body.error) : null],
+          ),
+        )
+        if (rows.length === 0) return send(res, 404, { success: false, error: 'Task not found or not assigned to this device.' })
+        return send(res, 200, { success: true, task: rows[0] })
+      }
+
       if (path === '/approvals' && req.method === 'GET') {
         const rows = await withUserSession(identity.userId, (client) =>
           client.query('SELECT * FROM approvals ORDER BY created_at DESC LIMIT 50'),

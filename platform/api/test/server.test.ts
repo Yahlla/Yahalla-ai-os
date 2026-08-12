@@ -172,6 +172,76 @@ test('the owning human sees the paired device via RLS-scoped query', async () =>
   assert.ok(body.devices.some((d: any) => d.id === deviceId))
 })
 
+// Real device task dispatch, while the device from above is still
+// 'online' (the next test after this block revokes it).
+
+let dispatchedTaskId: string
+
+test('a human creates a task and it auto-assigns to their one online device', async () => {
+  const { status, body } = await api('/tasks', { method: 'POST', body: JSON.stringify({ title: 'Fix the bug', description: 'in App.tsx' }) }, humanJwt)
+  assert.equal(status, 200)
+  assert.equal(body.success, true)
+  assert.equal(body.task.status, 'queued')
+  assert.equal(body.task.assigned_device, deviceId)
+  dispatchedTaskId = body.task.id
+})
+
+test('a device (not a human) cannot create a task', async () => {
+  const { status, body } = await api('/tasks', { method: 'POST', body: JSON.stringify({ title: 'nope' }) }, deviceToken)
+  assert.equal(status, 403)
+  assert.match(body.error, /human/)
+})
+
+test('a human (not a device) cannot claim the next task', async () => {
+  const { status, body } = await api('/tasks/next', {}, humanJwt)
+  assert.equal(status, 403)
+  assert.match(body.error, /device/)
+})
+
+test('the paired device polls and atomically claims the queued task', async () => {
+  const { status, body } = await api('/tasks/next', {}, deviceToken)
+  assert.equal(status, 200)
+  assert.ok(body.task)
+  assert.equal(body.task.id, dispatchedTaskId)
+  assert.equal(body.task.status, 'running')
+})
+
+test('polling again finds nothing left to claim (already running, not queued)', async () => {
+  const { status, body } = await api('/tasks/next', {}, deviceToken)
+  assert.equal(status, 200)
+  assert.equal(body.task, null)
+})
+
+test('the device reports the task complete with real output', async () => {
+  const { status, body } = await api(
+    `/tasks/${dispatchedTaskId}/complete`,
+    { method: 'POST', body: JSON.stringify({ status: 'completed', output: { summary: 'Fixed it.' } }) },
+    deviceToken,
+  )
+  assert.equal(status, 200)
+  assert.equal(body.task.status, 'completed')
+  assert.equal(body.task.output.summary, 'Fixed it.')
+  assert.ok(body.task.completed_at)
+})
+
+test('the requesting human sees the completed task with its output', async () => {
+  const { status, body } = await api('/tasks', {}, humanJwt)
+  assert.equal(status, 200)
+  const task = body.tasks.find((t: any) => t.id === dispatchedTaskId)
+  assert.equal(task.status, 'completed')
+  assert.equal(task.output.summary, 'Fixed it.')
+})
+
+test('creating a task with no paired online device gives a clear error, not a silent stuck task', async () => {
+  const strangerId = randomUUID()
+  await getPool().query('INSERT INTO auth.users (id, email) VALUES ($1, $2)', [strangerId, 'no-device@test.local'])
+  const strangerJwt = signTestJwt(strangerId)
+
+  const { status, body } = await api('/tasks', { method: 'POST', body: JSON.stringify({ title: 'orphan task' }) }, strangerJwt)
+  assert.equal(status, 409)
+  assert.match(body.error, /No paired, online device/)
+})
+
 test('a revoked device is rejected on its next request', async () => {
   const pool = getPool()
   await pool.query("UPDATE devices SET status = 'revoked' WHERE id = $1", [deviceId])
