@@ -48,6 +48,38 @@ where:
   entries, verified in `api/test/server.test.ts` (including that search
   ranks by real cosine similarity, not just returns rows).
 
+## Cloud smart tier (opt-in, off by default)
+
+An additional escalation path for heavier reasoning than the local/browser
+models can do, forwarding a chat request to a free-tier OpenAI-compatible
+provider (Groq's `llama-3.3-70b-versatile` by default). Deliberately built
+as its own narrow thing, not folded into local-runtime's `chatCompletion`:
+
+- **The upstream API key never leaves this server.** The browser only ever
+  calls `POST /smart-tier/chat` on platform-api with the user's own
+  Supabase session token; platform-api holds `CLOUD_TIER_API_KEY` and
+  attaches it server-side. No client-side code path ever sees the key.
+- **Off by default, all the way off.** Leave `CLOUD_TIER_API_KEY` unset in
+  `platform/.env` and the route always returns 503 -- there is no
+  half-enabled state.
+- **local-runtime is untouched.** `local-runtime/src/llm.ts`'s
+  `chatCompletion` has a deliberate, on-purpose invariant that it never
+  calls anything outside `127.0.0.1` -- this cloud tier is a completely
+  separate code path so that invariant stays true.
+- **Portable by construction.** `CLOUD_TIER_URL` / `CLOUD_TIER_MODEL` are
+  the only things that change to point this at a self-hosted,
+  OpenAI-compatible server later (vLLM, llama.cpp's server, Ollama) instead
+  of a free-tier provider -- no code change, just `platform/.env`.
+
+To enable: get a free API key from https://console.groq.com, add to
+`platform/.env`:
+
+```
+CLOUD_TIER_API_KEY=gsk_...
+```
+
+then `cd platform && docker compose --env-file .env up -d --build`.
+
 ## Load protection
 
 Two independent layers, neither trusting the other to be enough alone:

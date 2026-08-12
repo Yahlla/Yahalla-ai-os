@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHmac, randomUUID } from 'node:crypto'
+import { createServer as createFakeHttpServer } from 'node:http'
 import { after, before, test } from 'node:test'
 import { closePool, getPool } from '../src/db.js'
 import { createPlatformServer } from '../src/server.js'
@@ -31,6 +32,15 @@ let baseUrl: string
 let humanUserId: string
 let humanJwt: string
 
+// A second server instance with the cloud tier configured against a fake
+// upstream (standing in for Groq's OpenAI-compatible API), the same
+// fake-HTTP-server pattern used throughout this repo instead of a mocking
+// library -- real HTTP, real JSON parsing, real error paths.
+let cloudTierServer: import('node:http').Server
+let cloudTierBaseUrl: string
+let fakeUpstream: import('node:http').Server
+let fakeUpstreamBehavior: 'ok' | 'upstream-error' = 'ok'
+
 before(async () => {
   process.env.DATABASE_URL = process.env.TEST_DATABASE_URL
   if (!process.env.DATABASE_URL) throw new Error('TEST_DATABASE_URL must be set to run these tests.')
@@ -39,16 +49,43 @@ before(async () => {
   await getPool().query('INSERT INTO auth.users (id, email) VALUES ($1, $2)', [humanUserId, 'owner@test.local'])
   humanJwt = signTestJwt(humanUserId)
 
-  const server = createPlatformServer({ port: 0, supabaseJwtSecret: JWT_SECRET, allowedOrigins: [] })
+  const server = createPlatformServer({ port: 0, supabaseJwtSecret: JWT_SECRET, allowedOrigins: [], cloudTier: null })
   httpServer = server
   await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', () => resolve()))
   const address = httpServer.address()
   const port = typeof address === 'object' && address ? address.port : 0
   baseUrl = `http://127.0.0.1:${port}`
+
+  fakeUpstream = createFakeHttpServer(async (req, res) => {
+    if (fakeUpstreamBehavior === 'upstream-error') {
+      res.writeHead(401, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'invalid_api_key' }))
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'fake 70B reply' } }] }))
+  })
+  await new Promise<void>((resolve) => fakeUpstream.listen(0, '127.0.0.1', () => resolve()))
+  const upstreamAddress = fakeUpstream.address()
+  const upstreamPort = typeof upstreamAddress === 'object' && upstreamAddress ? upstreamAddress.port : 0
+
+  const cloudServer = createPlatformServer({
+    port: 0,
+    supabaseJwtSecret: JWT_SECRET,
+    allowedOrigins: [],
+    cloudTier: { url: `http://127.0.0.1:${upstreamPort}`, model: 'fake-70b', apiKey: 'fake-key' },
+  })
+  cloudTierServer = cloudServer
+  await new Promise<void>((resolve) => cloudTierServer.listen(0, '127.0.0.1', () => resolve()))
+  const cloudAddress = cloudTierServer.address()
+  const cloudPort = typeof cloudAddress === 'object' && cloudAddress ? cloudAddress.port : 0
+  cloudTierBaseUrl = `http://127.0.0.1:${cloudPort}`
 })
 
 after(async () => {
   httpServer.close()
+  cloudTierServer.close()
+  fakeUpstream.close()
   await closePool()
 })
 
@@ -332,4 +369,54 @@ test('posting a message with an invalid role is rejected', async () => {
   const { status, body } = await api(`/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify({ role: 'villain', content: 'x' }) }, humanJwt)
   assert.equal(status, 400)
   assert.match(body.error, /role/)
+})
+
+// Cloud smart tier: off-by-default against the main server, on against a
+// second server instance pointed at a fake upstream (see `before` above).
+
+test('cloud smart tier is 503 when not configured on this deployment', async () => {
+  const { status, body } = await api('/smart-tier/chat', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) }, humanJwt)
+  assert.equal(status, 503)
+  assert.match(body.error, /not configured/)
+})
+
+async function cloudApi(path: string, init: RequestInit, token: string): Promise<{ status: number; body: any }> {
+  const response = await fetch(`${cloudTierBaseUrl}${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...init.headers },
+  })
+  return { status: response.status, body: await response.json() }
+}
+
+test('cloud smart tier requires authentication like every other route', async () => {
+  const response = await fetch(`${cloudTierBaseUrl}/smart-tier/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  assert.equal(response.status, 401)
+})
+
+test('cloud smart tier forwards to the configured upstream and returns its reply', async () => {
+  fakeUpstreamBehavior = 'ok'
+  const { status, body } = await cloudApi('/smart-tier/chat', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) }, humanJwt)
+  assert.equal(status, 200)
+  assert.equal(body.success, true)
+  assert.equal(body.content, 'fake 70B reply')
+  assert.equal(body.model, 'fake-70b')
+})
+
+test('cloud smart tier surfaces an upstream auth failure as a clean error, not a crash', async () => {
+  fakeUpstreamBehavior = 'upstream-error'
+  const { status, body } = await cloudApi('/smart-tier/chat', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) }, humanJwt)
+  fakeUpstreamBehavior = 'ok'
+  assert.equal(status, 502)
+  assert.equal(body.success, false)
+  assert.match(body.error, /HTTP 401/)
+})
+
+test('cloud smart tier rejects a malformed messages array', async () => {
+  const { status, body } = await cloudApi('/smart-tier/chat', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user' }] }) }, humanJwt)
+  assert.equal(status, 400)
+  assert.match(body.error, /messages/)
 })

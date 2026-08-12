@@ -58,6 +58,15 @@ services:
       # conservative on Paket M-class hardware; raise it once you've
       # measured, not guessed).
       DB_POOL_MAX: ${PLATFORM_API_DB_POOL_MAX:-8}
+      # Opt-in cloud smart tier (see api/src/cloudTier.ts): off by default.
+      # Leave CLOUD_TIER_API_KEY unset in .env and this whole feature does
+      # not exist -- no route, no outbound calls, nothing to disable later.
+      # Set it to a free-tier key (Groq by default) to turn it on; swap
+      # CLOUD_TIER_URL/MODEL to point at your own OpenAI-compatible server
+      # later without any code change.
+      CLOUD_TIER_API_KEY: ${CLOUD_TIER_API_KEY:-}
+      CLOUD_TIER_URL: ${CLOUD_TIER_URL:-https://api.groq.com/openai/v1}
+      CLOUD_TIER_MODEL: ${CLOUD_TIER_MODEL:-llama-3.3-70b-versatile}
     mem_limit: 256m
     cpus: 0.5
 

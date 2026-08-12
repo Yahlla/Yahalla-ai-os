@@ -1306,6 +1306,7 @@ type ChatMessage = {
   error?: boolean
   attachments?: { name: string; size: number }[]
   imageDataUrl?: string
+  viaCloudBoost?: string
 }
 
 type AttachedFile = { name: string; content: string; size: number }
@@ -1543,6 +1544,12 @@ function ChatSection() {
   const [modelLoadStalled, setModelLoadStalled] = useState(false)
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null)
   const [runtimeTier, setRuntimeTier] = useState<'local' | 'browser' | 'cloud' | null>(null)
+  // Explicit, user-toggled escalation to the opt-in cloud smart tier (see
+  // platform/api/src/cloudTier.ts) -- distinct from runtimeTier's 'cloud',
+  // which is the legacy last-resort fallback when no on-device path exists
+  // at all. This one is always a deliberate choice, never automatic, and
+  // only ever available when platform-api is configured.
+  const [cloudBoostEnabled, setCloudBoostEnabled] = useState(false)
   const browserHistoryRef = useRef<BrowserChatMessage[]>([])
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -1944,8 +1951,27 @@ function ChatSection() {
       // end. The other two tiers are plain non-streaming REST calls and
       // still append their message the old way, after the fact.
       let streamingMessageId: string | null = null
+      let usedCloudBoostModel: string | undefined
 
-      if (runtimeHealth?.llm_reachable) {
+      if (cloudBoostEnabled && platformApi.isPlatformApiConfigured()) {
+        // Deliberate escalation, not a fallback: still tries this even if
+        // local-runtime/browser would also work, because the user
+        // explicitly asked for the stronger model this turn. Recent
+        // history is sent as plain {role, content} turns -- the cloud
+        // tier has no tool access and no memory of its own, it only ever
+        // sees what's in this one request.
+        const history = messages
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .slice(-20)
+          .map((m) => ({ role: m.role, content: m.content }))
+        const cloudResult = await platformApi.cloudTierChat([...history, { role: 'user', content: message }])
+        if (cloudResult.ok) {
+          usedCloudBoostModel = cloudResult.model
+          result = { success: true, answer: cloudResult.content, conversation_id: conversationId ?? undefined }
+        } else {
+          result = { success: false, error: cloudResult.error }
+        }
+      } else if (runtimeHealth?.llm_reachable) {
         setRuntimeTier('local')
         result = await localRuntime.sendChatMessage({ message, conversation_id: conversationId ?? undefined })
       } else if (await browserRuntime.checkBrowserRuntimeAvailable()) {
@@ -2016,6 +2042,7 @@ function ChatSection() {
           agent: result.agent?.key,
           toolActivity: result.executed_tools as { tool: string; result: Record<string, unknown> }[],
           error: !result.success,
+          viaCloudBoost: usedCloudBoostModel,
         }
         setMessages((prev) => [...prev, assistantMessage])
       }
@@ -2227,6 +2254,12 @@ function ChatSection() {
                   <div className={`message-bubble ${message.error ? 'message-error' : ''} ${message.id === streamingMessageId ? 'streaming' : ''}`}>
                     {message.content}
                   </div>
+                  {message.viaCloudBoost && (
+                    <div className="task-chip cloud-boost-chip" title="Answered by the opt-in cloud smart tier -- this message left your device.">
+                      <Sparkles size={12} />
+                      Cloud Boost · {message.viaCloudBoost}
+                    </div>
+                  )}
                   {message.taskId && (
                     <div className="task-chip">
                       <Zap size={12} />
@@ -2390,6 +2423,20 @@ function ChatSection() {
             <button type="button" className="composer-icon camera" onClick={openCamera} title="Take a photo">
               <Camera size={18} />
             </button>
+            {platformApi.isPlatformApiConfigured() && (
+              <button
+                type="button"
+                className={`composer-icon cloud-boost ${cloudBoostEnabled ? 'active' : ''}`}
+                onClick={() => setCloudBoostEnabled((v) => !v)}
+                title={
+                  cloudBoostEnabled
+                    ? 'Cloud Boost is ON -- this message will be sent to the opt-in cloud 70B tier'
+                    : 'Cloud Boost (off) -- click to send the next message to the opt-in cloud 70B tier'
+                }
+              >
+                <Sparkles size={18} />
+              </button>
+            )}
             <textarea
               ref={textareaRef}
               value={input}

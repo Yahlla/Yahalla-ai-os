@@ -75,3 +75,20 @@ export async function appendMessage(
 ): Promise<void> {
   await platformFetch(`/conversations/${conversationId}/messages`, { method: 'POST', body: JSON.stringify(message) })
 }
+
+// Opt-in cloud smart tier (server-side proxy to a free-tier 70B-class
+// model, see platform/api/src/cloudTier.ts). Same fail-soft shape as the
+// rest of this file: no platform-api configured, or the deployment hasn't
+// set a CLOUD_TIER_API_KEY, both just mean "not available" -- never a
+// thrown error the chat has to handle specially.
+export type CloudTierChatResult = { ok: true; content: string; model: string } | { ok: false; error: string }
+
+export async function cloudTierChat(messages: { role: string; content: string }[]): Promise<CloudTierChatResult> {
+  const res = await platformFetch('/smart-tier/chat', { method: 'POST', body: JSON.stringify({ messages }) })
+  if (!res) return { ok: false, error: 'Cloud smart tier is not reachable (platform server not configured).' }
+  const data = (await res.json()) as { success?: boolean; content?: string; model?: string; error?: string }
+  if (!res.ok || !data.success || typeof data.content !== 'string') {
+    return { ok: false, error: data.error ?? `Cloud smart tier request failed (HTTP ${res.status}).` }
+  }
+  return { ok: true, content: data.content, model: data.model ?? 'cloud' }
+}

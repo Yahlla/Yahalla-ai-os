@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { callCloudTier, type CloudTierConfig } from './cloudTier.js'
 import { getPool, withUserSession } from './db.js'
 import { verifyJwt } from './jwt.js'
 import { toVectorLiteral, validateEmbedding } from './memory.js'
@@ -8,6 +9,7 @@ export type PlatformConfig = {
   port: number
   supabaseJwtSecret: string
   allowedOrigins: string[]
+  cloudTier: CloudTierConfig | null
 }
 
 type Identity = { userId: string; kind: 'human' | 'device' }
@@ -363,6 +365,28 @@ export function createPlatformServer(config: PlatformConfig) {
               ),
         )
         return send(res, 200, { entries: rows.rows })
+      }
+
+      // Opt-in cloud smart tier -- see cloudTier.ts for why this lives here
+      // (server-side only, key never sent to the browser) rather than in
+      // local-runtime or the frontend. Any authenticated user of this
+      // platform can call it; there is no separate opt-in flag on the user
+      // record because the tier as a whole is already opt-in at the
+      // deployment level (CLOUD_TIER_API_KEY unset = route always 503s).
+      if (path === '/smart-tier/chat' && req.method === 'POST') {
+        if (!config.cloudTier) {
+          return send(res, 503, { success: false, error: 'Cloud smart tier is not configured on this deployment.' })
+        }
+        const body = await readJsonBody(req)
+        const messages = Array.isArray(body.messages) ? body.messages : null
+        if (!messages || messages.some((m) => typeof m?.role !== 'string' || typeof m?.content !== 'string')) {
+          return send(res, 400, { success: false, error: 'messages must be an array of {role, content}.' })
+        }
+        const result = await callCloudTier(config.cloudTier, messages)
+        if (!result.ok) {
+          return send(res, result.status, { success: false, error: result.error })
+        }
+        return send(res, 200, { success: true, content: result.content, model: config.cloudTier.model })
       }
 
       send(res, 404, { success: false, error: `No route for ${req.method} ${path}` })
