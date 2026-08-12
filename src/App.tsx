@@ -2272,8 +2272,17 @@ function ChatSection() {
       // (the cloud tier has no tool access and no memory of its own, it
       // only ever sees what's in this one request).
       async function callCloudBoost(): Promise<ChatResponse> {
+        // Only include assistant turns Cloud Boost itself produced
+        // (viaCloudBoost set) -- otherwise, switching to Cloud Boost mid-
+        // conversation feeds the 70B model another tier's prior replies
+        // as if they were its own. Observed live: after the small
+        // browser-tier model got stuck repeating a broken, language-
+        // mixed denial, turning Cloud Boost on made the 70B model
+        // continue that same broken pattern, because it saw those
+        // garbled turns in its own history and continued the style.
+        // User turns are always real regardless of which tier answered.
         const history = messages
-          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .filter((m) => m.role === 'user' || (m.role === 'assistant' && m.viaCloudBoost))
           .slice(-20)
           .map((m) => ({ role: m.role, content: m.content }))
         const cloudResult = await platformApi.cloudTierChat([
