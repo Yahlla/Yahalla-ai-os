@@ -208,6 +208,17 @@ export function createPlatformServer(config: PlatformConfig) {
         return send(res, 200, { success: true, task: rows[0] })
       }
 
+      // Lets the human who created a task (chat composer task dispatch,
+      // see task #80) poll it to completion. RLS's "Users can read their
+      // own requested tasks" policy (requested_by = auth.uid()) is what
+      // actually scopes this to the caller's own tasks.
+      const taskGetMatch = path.match(/^\/tasks\/([^/]+)$/)
+      if (taskGetMatch && req.method === 'GET') {
+        const { rows } = await withUserSession(identity.userId, (client) => client.query('SELECT * FROM tasks WHERE id = $1', [taskGetMatch[1]]))
+        if (rows.length === 0) return send(res, 404, { success: false, error: 'Task not found.' })
+        return send(res, 200, { success: true, task: rows[0] })
+      }
+
       if (path === '/approvals' && req.method === 'GET') {
         const rows = await withUserSession(identity.userId, (client) =>
           client.query('SELECT * FROM approvals ORDER BY created_at DESC LIMIT 50'),

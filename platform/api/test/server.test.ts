@@ -232,6 +232,30 @@ test('the requesting human sees the completed task with its output', async () =>
   assert.equal(task.output.summary, 'Fixed it.')
 })
 
+test('the requesting human can poll a single task by id (GET /tasks/:id) until it completes', async () => {
+  const { status, body } = await api(`/tasks/${dispatchedTaskId}`, {}, humanJwt)
+  assert.equal(status, 200)
+  assert.equal(body.success, true)
+  assert.equal(body.task.id, dispatchedTaskId)
+  assert.equal(body.task.status, 'completed')
+  assert.equal(body.task.output.summary, 'Fixed it.')
+})
+
+test('a stranger cannot poll another user\'s task by id (RLS: requested_by isolation)', async () => {
+  const strangerId = randomUUID()
+  await getPool().query('INSERT INTO auth.users (id, email) VALUES ($1, $2)', [strangerId, 'task-snooper@test.local'])
+  const strangerJwt = signTestJwt(strangerId)
+
+  const { status, body } = await api(`/tasks/${dispatchedTaskId}`, {}, strangerJwt)
+  assert.equal(status, 404)
+  assert.match(body.error, /not found/i)
+})
+
+test('polling a nonexistent task id returns 404', async () => {
+  const { status } = await api(`/tasks/${randomUUID()}`, {}, humanJwt)
+  assert.equal(status, 404)
+})
+
 test('creating a task with no paired online device gives a clear error, not a silent stuck task', async () => {
   const strangerId = randomUUID()
   await getPool().query('INSERT INTO auth.users (id, email) VALUES ($1, $2)', [strangerId, 'no-device@test.local'])
