@@ -26,6 +26,15 @@ DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL;
 DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE service_role NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- The exported supabase/migrations/*.sql dump assumes Supabase's own
+-- bootstrap superuser is literally named "postgres" (every table/function
+-- has "ALTER ... OWNER TO postgres"). This self-hosted instance's actual
+-- bootstrap superuser is whatever POSTGRES_USER was set to (see
+-- docker-compose.yml), not "postgres" -- so a plain "postgres" role is
+-- created here purely as an ownership label the migrations can target
+-- unmodified. NOLOGIN: nothing should ever authenticate as it directly.
+DO $$ BEGIN CREATE ROLE "postgres" NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
 GRANT SELECT ON auth.users TO anon, authenticated, service_role;
 GRANT INSERT, UPDATE, DELETE ON auth.users TO service_role;
