@@ -85,8 +85,10 @@ until [ "$(docker compose --env-file .env ps -q postgres | xargs docker inspect 
 done
 
 step "4/6  Applying the database schema"
+# POSIX sh's "." builtin searches $PATH for a bare filename (no slash),
+# not the current directory -- "./.env" forces it to resolve relative to cwd.
 # shellcheck disable=SC1090
-. .env
+. ./.env
 docker compose --env-file .env exec -T \
   -e PGHOST=localhost -e PGUSER=yahalla -e PGPASSWORD="$POSTGRES_PASSWORD" -e PGDATABASE=yahalla \
   postgres sh /workspace/platform/db/apply.sh
