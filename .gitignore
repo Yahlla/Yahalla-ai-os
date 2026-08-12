@@ -2,6 +2,7 @@ node_modules/
 dist/
 desktop/resources/
 desktop/dist-electron/
+public/mediapipe/
 .env
 .env.local
 .env.*.local

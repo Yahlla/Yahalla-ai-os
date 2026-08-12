@@ -11,6 +11,7 @@ import * as platformApi from './lib/platformApi'
 import { requestMediaPermission } from './lib/capabilities'
 import { createVoiceRecognizer, isSpeechRecognitionSupported, type VoiceRecognizer } from './lib/voiceInput'
 import * as voiceOutput from './lib/voiceOutput'
+import { createBlinkDetector, isGestureControlSupported, type BlinkDetector } from './lib/gestureControl'
 import type { BrowserChatMessage } from './lib/browserLLM'
 import type {
   Agent,
@@ -1632,6 +1633,13 @@ function ChatSection() {
   const [cameraError, setCameraError] = useState('')
   const [capturedImage, setCapturedImage] = useState<string | null>(null)
   const [pendingImage, setPendingImage] = useState<string | null>(null)
+  // Blink-to-capture: opt-in per camera session, off by default. Loads a
+  // few-MB model on first enable (see gestureControl.ts), so it's never
+  // started automatically just because the camera opened.
+  const [gestureEnabled, setGestureEnabled] = useState(false)
+  const [gestureLoading, setGestureLoading] = useState(false)
+  const [gestureError, setGestureError] = useState('')
+  const gestureDetectorRef = useRef<BlinkDetector | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const cameraStreamRef = useRef<MediaStream | null>(null)
   const [sending, setSending] = useState(false)
@@ -1672,6 +1680,7 @@ function ChatSection() {
   useEffect(() => {
     return () => {
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
+      gestureDetectorRef.current?.stop()
     }
   }, [])
 
@@ -2059,6 +2068,37 @@ function ChatSection() {
     }
   }
 
+  function stopGestureDetector() {
+    gestureDetectorRef.current?.stop()
+    gestureDetectorRef.current = null
+    setGestureEnabled(false)
+  }
+
+  async function toggleGesture() {
+    if (gestureEnabled) {
+      stopGestureDetector()
+      return
+    }
+    setGestureError('')
+    if (!isGestureControlSupported() || !videoRef.current) {
+      setGestureError('التحكم بالإيماءات غير مدعوم على هذا الجهاز.')
+      return
+    }
+    setGestureLoading(true)
+    const detector = await createBlinkDetector(
+      () => capturePhoto(),
+      (message) => {
+        setGestureError(message)
+        stopGestureDetector()
+      },
+    )
+    setGestureLoading(false)
+    if (!detector) return
+    gestureDetectorRef.current = detector
+    detector.attach(videoRef.current)
+    setGestureEnabled(true)
+  }
+
   function capturePhoto() {
     const video = videoRef.current
     if (!video || video.videoWidth === 0) return
@@ -2070,6 +2110,7 @@ function ChatSection() {
     ctx.drawImage(video, 0, 0)
     setCapturedImage(canvas.toDataURL('image/jpeg', 0.85))
     stopCameraStream()
+    stopGestureDetector()
   }
 
   function retakePhoto() {
@@ -2079,6 +2120,7 @@ function ChatSection() {
 
   function closeCamera() {
     stopCameraStream()
+    stopGestureDetector()
     setCameraOpen(false)
     setCapturedImage(null)
   }
@@ -2616,6 +2658,13 @@ function ChatSection() {
                   // eslint-disable-next-line jsx-a11y/media-has-caption
                   <video ref={videoRef} autoPlay playsInline muted />
                 )}
+                {!capturedImage && isGestureControlSupported() && (
+                  <label className="gesture-toggle">
+                    <input type="checkbox" checked={gestureEnabled} disabled={gestureLoading} onChange={toggleGesture} />
+                    {gestureLoading ? 'Loading gesture model…' : gestureEnabled ? 'Blink to capture · ON' : 'Blink to capture (hands-free)'}
+                  </label>
+                )}
+                {gestureError && <div className="composer-error">{gestureError}</div>}
                 <div className="camera-modal-actions">
                   {capturedImage ? (
                     <>
