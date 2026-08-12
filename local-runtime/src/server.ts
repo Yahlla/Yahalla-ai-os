@@ -3,6 +3,7 @@ import { resumeApproval, runChat, type RuntimeContext } from './agentLoop.js'
 import type { RuntimeConfig } from './config.js'
 import { saveConfig } from './config.js'
 import type { Db } from './db.js'
+import { addDatabaseConnection, listDatabaseConnections, removeDatabaseConnection } from './database.js'
 import { pairDevice } from './devicePairing.js'
 import { EmbodimentStateMachine } from './embodiment/stateMachine.js'
 import { githubApiBase } from './github.js'
@@ -341,6 +342,37 @@ export function createHttpServer(deps: ServerDeps) {
         const token = getPreference<string | null>(deps.db, 'github_token')
         const username = getPreference<string | null>(deps.db, 'github_username')
         return send(res, 200, { configured: Boolean(token), username: token ? username ?? null : null })
+      }
+
+      // Database connector (Integrations Hub): connecting validates with a
+      // real SELECT 1 before storing anything (see database.ts), and the
+      // connection string is never returned back once saved -- only name,
+      // id, and creation time. The db_query/db_execute/db_list_connections
+      // tools (agentLoop.ts) are what actually use these once connected.
+      if (path === '/integrations/database' && req.method === 'GET') {
+        return send(res, 200, { connections: listDatabaseConnections(deps.db) })
+      }
+
+      if (path === '/integrations/database' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const name = String(body.name ?? '').trim()
+        const connectionString = String(body.connection_string ?? '').trim()
+        if (!name || !connectionString) {
+          return send(res, 400, { success: false, error: 'name and connection_string are required.' })
+        }
+        try {
+          const connection = await addDatabaseConnection(deps.db, name, connectionString)
+          return send(res, 200, { success: true, connection })
+        } catch (error) {
+          return send(res, 400, { success: false, error: error instanceof Error ? error.message : 'Could not connect to that database.' })
+        }
+      }
+
+      const databaseDeleteMatch = path.match(/^\/integrations\/database\/([^/]+)$/)
+      if (databaseDeleteMatch && req.method === 'DELETE') {
+        const removed = removeDatabaseConnection(deps.db, databaseDeleteMatch[1]!)
+        if (!removed) return send(res, 404, { success: false, error: 'Unknown database connection.' })
+        return send(res, 200, { success: true })
       }
 
       if (path === '/permissions' && req.method === 'GET') {

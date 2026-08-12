@@ -1455,6 +1455,129 @@ function GitHubIntegrationCard() {
   )
 }
 
+// Integrations Hub -- Databases card: unlocks agentLoop's db_query
+// (read-only, enforced by a real Postgres READ ONLY transaction -- rejected
+// at the database engine level, not just by app convention) and db_execute
+// (writes/DDL, approval-gated like git_push) tools. Supports multiple named
+// connections, card-grid style like the Devices page, since a real setup
+// usually has more than one database (production, staging, ...). Every
+// connection is validated with a real SELECT 1 before it's ever stored.
+function DatabaseIntegrationCard() {
+  const [connections, setConnections] = useState<localRuntime.DatabaseConnectionSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [adding, setAdding] = useState(false)
+  const [name, setName] = useState('')
+  const [connectionString, setConnectionString] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [removing, setRemoving] = useState<string | null>(null)
+
+  function load() {
+    setLoading(true)
+    localRuntime.listDatabaseConnections().then(setConnections).finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  async function handleAdd(event: FormEvent) {
+    event.preventDefault()
+    if (!name.trim() || !connectionString.trim()) return
+    setSaving(true)
+    setError('')
+    const result = await localRuntime.addDatabaseConnection(name.trim(), connectionString.trim())
+    setSaving(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    setName('')
+    setConnectionString('')
+    setAdding(false)
+    load()
+  }
+
+  async function handleRemove(id: string) {
+    setRemoving(id)
+    await localRuntime.removeDatabaseConnection(id)
+    setRemoving(null)
+    load()
+  }
+
+  return (
+    <div className="info-panel" style={{ marginTop: 20 }}>
+      <div className="info-panel-header">
+        <Server size={18} />
+        <span>Databases (this computer)</span>
+        {!loading && (
+          <span className="status-badge badge-success" style={{ marginInlineStart: 'auto' }}>
+            {connections.length} connected
+          </span>
+        )}
+      </div>
+      <div className="info-panel-body">
+        <p className="data-card-desc" style={{ marginBottom: 12 }}>
+          Lets Yahalla query and, with your approval, modify real databases (the db_query/db_execute tools).
+          Connection strings are validated against the real database and stored only on this machine.
+        </p>
+        {error && <p className="data-card-desc" style={{ color: '#fca5a5', marginBottom: 8 }}>{error}</p>}
+
+        <div className="card-grid" style={{ marginBottom: adding ? 12 : 0 }}>
+          {connections.map((connection) => (
+            <div key={connection.id} className="data-card">
+              <div className="data-card-header">
+                <div className="data-card-icon"><Server size={18} /></div>
+                <div className="data-card-title">
+                  <div className="data-card-name">{connection.name}</div>
+                  <div className="data-card-sub">Connected {new Date(connection.createdAt).toLocaleString()}</div>
+                </div>
+              </div>
+              <div className="data-card-actions">
+                <button className="mini-button reject" disabled={removing === connection.id} onClick={() => handleRemove(connection.id)}>
+                  <X size={14} /> Remove
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {adding ? (
+          <form onSubmit={handleAdd}>
+            <input
+              className="text-input"
+              placeholder="Name (e.g. Production)"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              style={{ width: '100%', marginBottom: 8 }}
+            />
+            <input
+              className="text-input"
+              type="password"
+              placeholder="postgresql://user:password@host:5432/dbname"
+              value={connectionString}
+              onChange={(e) => setConnectionString(e.target.value)}
+              style={{ width: '100%', marginBottom: 8 }}
+            />
+            <div className="data-card-actions">
+              <button type="submit" className="mini-button approve" disabled={saving || !name.trim() || !connectionString.trim()}>
+                <Check size={14} /> {saving ? 'Connecting…' : 'Connect'}
+              </button>
+              <button type="button" className="mini-button reject" onClick={() => setAdding(false)}>
+                <X size={14} /> Cancel
+              </button>
+            </div>
+          </form>
+        ) : (
+          <button className="mini-button approve" onClick={() => setAdding(true)}>
+            <Server size={14} /> Connect a database
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function SettingsSection() {
   return (
     <div className="admin-section">
@@ -1495,6 +1618,7 @@ function SettingsSection() {
         <p>Connect real services and tools with one click -- no terminal, ever</p>
       </div>
       <GitHubIntegrationCard />
+      <DatabaseIntegrationCard />
       <CloudTierSettingsCard />
     </div>
   )

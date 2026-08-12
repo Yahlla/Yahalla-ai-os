@@ -2,7 +2,7 @@ import type { AccessLevel, PermissionScope } from './permissions.js'
 
 export type ToolDef = {
   key: string
-  category: 'files' | 'system' | 'github'
+  category: 'files' | 'system' | 'github' | 'database'
   requiresApproval: boolean
   description: string
   parameters: Record<string, unknown>
@@ -175,6 +175,46 @@ export const TOOLS: ToolDef[] = [
         description: { type: 'string' },
       },
       required: ['operation', 'name'],
+      additionalProperties: false,
+    },
+    permission: { scope: 'network', access: 'write' },
+  },
+  {
+    key: 'db_list_connections',
+    category: 'database',
+    requiresApproval: false,
+    description: 'List the databases connected in Settings -> Integrations, by name and id. Call this before db_query/db_execute if you don\'t already know the connection id. Read-only.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    permission: { scope: 'network', access: 'read' },
+  },
+  {
+    key: 'db_query',
+    category: 'database',
+    requiresApproval: false,
+    description: 'Run a read-only SQL query (SELECT/EXPLAIN/etc.) against a connected database. Runs inside a real read-only transaction -- any data-modifying statement is rejected by the database itself, not just disallowed by convention. Use db_execute for writes/DDL. Read-only.',
+    parameters: {
+      type: 'object',
+      properties: {
+        connection_id: { type: 'string', description: 'id from db_list_connections.' },
+        query: { type: 'string', description: 'SQL to run.' },
+      },
+      required: ['connection_id', 'query'],
+      additionalProperties: false,
+    },
+    permission: { scope: 'network', access: 'read' },
+  },
+  {
+    key: 'db_execute',
+    category: 'database',
+    requiresApproval: true,
+    description: 'Run a data-modifying SQL statement (INSERT/UPDATE/DELETE/DDL) against a connected database. Requires approval -- the exact SQL is shown to the user before it runs.',
+    parameters: {
+      type: 'object',
+      properties: {
+        connection_id: { type: 'string', description: 'id from db_list_connections.' },
+        query: { type: 'string', description: 'SQL to run.' },
+      },
+      required: ['connection_id', 'query'],
       additionalProperties: false,
     },
     permission: { scope: 'network', access: 'write' },

@@ -229,6 +229,44 @@ export async function disconnectGithub(): Promise<void> {
   await runtimeFetch('/integrations/github', { method: 'DELETE' }).catch(() => {})
 }
 
+// Integrations Hub (Databases): each connection unlocks the db_query
+// (read-only, enforced by a real Postgres READ ONLY transaction) and
+// db_execute (writes/DDL, approval-gated) tools already wired into
+// agentLoop -- see local-runtime/src/database.ts. Device-local, same
+// reasoning as GitHub: the connection string is validated with a real
+// SELECT 1 and stored only on the machine that runs the tools, never sent
+// to or through Strato.
+export type DatabaseConnectionSummary = { id: string; name: string; createdAt: string }
+
+export async function listDatabaseConnections(): Promise<DatabaseConnectionSummary[]> {
+  try {
+    const response = await runtimeFetch('/integrations/database')
+    if (!response.ok) return []
+    const data = (await response.json()) as { connections?: DatabaseConnectionSummary[] }
+    return data.connections ?? []
+  } catch {
+    return []
+  }
+}
+
+export async function addDatabaseConnection(name: string, connectionString: string): Promise<{ ok: true; connection: DatabaseConnectionSummary } | { ok: false; error: string }> {
+  try {
+    const response = await runtimeFetch('/integrations/database', {
+      method: 'POST',
+      body: JSON.stringify({ name, connection_string: connectionString }),
+    })
+    const result = (await response.json()) as { success?: boolean; connection?: DatabaseConnectionSummary; error?: string }
+    if (!response.ok || !result.success || !result.connection) return { ok: false, error: result.error ?? `Connecting failed (HTTP ${response.status}).` }
+    return { ok: true, connection: result.connection }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'Local Agent Runtime is not reachable from this window.' }
+  }
+}
+
+export async function removeDatabaseConnection(id: string): Promise<void> {
+  await runtimeFetch(`/integrations/database/${id}`, { method: 'DELETE' }).catch(() => {})
+}
+
 export async function decideApproval(approvalId: string, decision: 'approve' | 'reject'): Promise<ChatResponse> {
   const response = await runtimeFetch(`/approvals/${approvalId}/decide`, {
     method: 'POST',

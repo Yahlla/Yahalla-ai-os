@@ -103,6 +103,13 @@ CREATE TABLE IF NOT EXISTS approvals (
   decided_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS database_connections (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  connection_string TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS models (
   id TEXT PRIMARY KEY,
   key TEXT UNIQUE NOT NULL,

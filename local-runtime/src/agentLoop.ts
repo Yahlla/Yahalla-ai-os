@@ -1,4 +1,5 @@
 import { executeDeviceTool } from '@yahalla/agent-tools'
+import { listDatabaseConnections, queryDatabase, executeDatabase } from './database.js'
 import type { Db } from './db.js'
 import { newId } from './db.js'
 import type { EmbodimentStateMachine } from './embodiment/stateMachine.js'
@@ -51,6 +52,8 @@ Coding-agent workflow for any request that touches the project:
 1. Analyze the request. 2. Inspect the project for real (list_project_files / read_project_file) before assuming anything. 3. Plan the change. 4. Execute it (write_project_file / patch_project_file) -- old_text must be copied verbatim from a read you just did. 5. Verify by reading the file back or using git_diff. 6. Run the relevant test/build command (run_project_command) when one applies. 7. If it fails, diagnose the real output, fix it, and re-run the same command. Repeat until it passes or you have a concrete, evidence-based reason it cannot. 8. Only then report the outcome, citing what you actually verified.
 
 Git and GitHub: git_status/git_diff are read-only and safe to use freely. git_commit, git_push, and github.write are sensitive and require the user's approval -- the platform enforces this automatically; just call the tool, never ask the user to run commands themselves, and never fabricate a commit hash, repo URL, or push result.
+
+Databases: call db_list_connections first if you don't already know a connection's id. db_query is read-only (enforced by the database itself, not just convention) and safe to use freely for inspecting data/schema. db_execute runs writes/DDL and requires the user's approval -- call it directly, never ask the user to run SQL themselves, and never fabricate query results or row counts.
 ${perceptionContext ? `\n${perceptionContext}\n` : ''}
 Be concise and useful. Respond in the user's language.
 `.trim()
@@ -101,6 +104,12 @@ function summarizeToolCall(tool: ToolDef, args: Record<string, unknown>): string
       return 'Checking GitHub repositories'
     case 'github.write':
       return 'Creating GitHub repository'
+    case 'db_list_connections':
+      return 'Listing connected databases'
+    case 'db_query':
+      return 'Querying the database'
+    case 'db_execute':
+      return 'Modifying the database'
     default:
       return `Using ${tool.key}`
   }
@@ -134,6 +143,15 @@ async function executeToolNow(
   if (tool.category === 'github') {
     const token = getPreference<string>(ctx.db, 'github_token')
     return tool.key === 'github.read' ? githubRead(token, args) : githubWrite(token, args)
+  }
+
+  if (tool.category === 'database') {
+    if (tool.key === 'db_list_connections') {
+      return { success: true, connections: listDatabaseConnections(ctx.db) }
+    }
+    const connectionId = String(args.connection_id ?? '')
+    const query = String(args.query ?? '')
+    return tool.key === 'db_query' ? queryDatabase(ctx.db, connectionId, query) : executeDatabase(ctx.db, connectionId, query)
   }
 
   const config = tool.key === 'run_project_command' ? { allowlist: DEFAULT_RUN_COMMAND_ALLOWLIST } : {}
