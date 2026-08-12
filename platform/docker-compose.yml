@@ -91,6 +91,24 @@ services:
       # Leave unset and the endpoint stays disabled (404); the button keeps
       # working manually either way.
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      # "Sign in with GitHub" (api/src/githubOAuth.ts): a real one-click
+      # authorize flow for the platform-level GitHub connection, instead of
+      # copy-pasting a Personal Access Token. Requires a GitHub OAuth App
+      # you create yourself at github.com/settings/developers, with its
+      # Authorization callback URL set to exactly
+      # https://<this deployment's domain>/auth/github/callback -- then set
+      # its Client ID/Secret below. Leave both unset and this stays cleanly
+      # disabled (503 on /auth/github/start, 404 on the callback); the
+      # manual Personal Access Token field in Settings keeps working either
+      # way, so this is purely an upgrade, never a requirement.
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
+      GITHUB_OAUTH_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET:-}
+      # Where the OAuth callback redirects the browser back to once GitHub
+      # returns control (?github_oauth=success|error) -- the frontend's own
+      # origin, since platform-api never serves the frontend itself. Only
+      # needed if it differs from the first entry of ALLOWED_ORIGINS above
+      # (which is used as the fallback when this is unset).
+      FRONTEND_URL: ${FRONTEND_URL:-}
     mem_limit: 256m
     cpus: 0.5
 

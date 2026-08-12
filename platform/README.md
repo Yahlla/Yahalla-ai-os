@@ -144,6 +144,26 @@ domain and Supabase JWT secret), applies the schema, and brings the stack
 up. This is the one allowed terminal session -- see the script's header
 comment. Safe to re-run.
 
+## Connecting the frontend to this platform (`VITE_PLATFORM_API_URL`)
+
+Everything above is the backend (`platform/api`). The Control Center UI
+(`src/`) is a separate static build that talks to it over HTTP -- it needs
+to be told this deployment's URL via `VITE_PLATFORM_API_URL`
+(`src/lib/platformApi.ts`). This is a **Vite build-time** variable, not a
+runtime one: it gets inlined into the JS bundle by `vite build`, so it
+must be set in whatever environment actually *runs* that build command
+(your CI pipeline, or wherever `npm run build` executes for the frontend)
+-- setting it only as a runtime env var on the host that *serves* the
+already-built static files does nothing, because by then the value is
+already baked in (or missing) from the build step.
+
+If every feature on this platform (Cloud Smart Tier, GitHub Connection,
+Deployments, etc.) shows **"Platform server is not configured"** on a live
+deployment even though `platform/api` itself is up and `/health` responds,
+this is almost always the cause: rebuild the frontend with
+`VITE_PLATFORM_API_URL=https://<your platform-api domain>` actually set at
+build time, then redeploy the resulting static files.
+
 ## After setup: no terminal
 
 Every further change ships through the admin panel's **Deployments** page:
@@ -155,13 +175,62 @@ The first person to ever sign in becomes the platform owner automatically
 (the same `handle_new_user` rule the Supabase-hosted deployment already
 uses) -- no separate admin-creation step.
 
+## "Sign in with GitHub" (`api/src/githubOAuth.ts`)
+
+A real one-click authorize flow for the platform-level GitHub connection,
+so an end user never has to know what a Personal Access Token is or how to
+create one. The **Settings -> GitHub Connection** card shows a **Connect
+with GitHub** button (falling back to the manual PAT field only if OAuth
+isn't configured on this deployment):
+
+1. `POST /auth/github/start` (authenticated) mints a real
+   `github.com/login/oauth/authorize` URL carrying a short-lived,
+   HMAC-signed `state` that identifies which human started the flow --
+   there's no server-side session table, `state` itself is the credential,
+   verified on the way back. The frontend does
+   `window.location.href = url` itself, a real top-level browser
+   navigation.
+2. The user authorizes on github.com (or denies -- either way GitHub
+   redirects back).
+3. `GET /auth/github/callback` (unauthenticated -- a top-level redirect
+   carries no bearer token) verifies `state`, exchanges the code for a
+   token, validates it against GitHub's `/user` endpoint, stores it as the
+   platform's GitHub connection, and redirects the browser back to the
+   frontend with `?github_oauth=success` or `?github_oauth=error&message=...`.
+   The Control Center picks this up on load, switches to Settings, and
+   shows the result.
+
+**Setup (one-time, only the deployment owner can do this):** create a
+GitHub OAuth App at
+[github.com/settings/developers](https://github.com/settings/developers) →
+**New OAuth App**. Fill in:
+
+- **Application name**: anything (e.g. "Yahalla AI -- your-domain.com")
+- **Homepage URL**: your frontend's URL (wherever the built `src/` app is
+  served from)
+- **Authorization callback URL**: `https://<your platform-api domain>/auth/github/callback`
+  -- must match exactly, including scheme and no trailing slash
+
+Copy the generated **Client ID** and **Client Secret** into
+`GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` in `platform/.env`,
+and set `FRONTEND_URL` if it isn't already covered by the first entry of
+`ALLOWED_ORIGINS`. Restart platform-api
+(`docker compose --env-file .env up -d --build`) to pick it up -- unlike
+the cloud-tier/GitHub-token settings, these are real OAuth App credentials
+tied to a specific registered callback URL, so they're env-file
+configuration rather than a Settings-page field. Leave both unset and
+nothing breaks: the button just doesn't appear, and the manual PAT field
+is the only (still fully working) way to connect.
+
 ## Zero-local-agent coding path (`api/src/codingAgent.ts` + `githubCommit.ts`)
 
 For a deployment that wants to run entirely without any local Agent on any
-device: connect a GitHub token at the platform level (**Settings -> GitHub
-Connection**, validated against GitHub before it's stored, never echoed
-back) and a real Claude key (**Settings -> Cloud Smart Tier**, provider
-"Claude"). With both configured, the composer's **Cloud Coding Agent**
+device: connect a GitHub account at the platform level (**Settings ->
+GitHub Connection**, via the one-click "Sign in with GitHub" above or a
+manual Personal Access Token -- either way, validated against GitHub
+before it's stored, never echoed back) and a real Claude key (**Settings
+-> Cloud Smart Tier**, provider "Claude"). With both configured, the
+composer's **Cloud Coding Agent**
 toggle (the branch icon) routes a message to `POST /code/request` instead
 of chat: the server itself explores the real repository (`list_files` /
 `read_file`, via GitHub's Contents API) and, when it's ready, ships the
