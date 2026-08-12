@@ -39,6 +39,7 @@ let humanJwt: string
 let cloudTierServer: import('node:http').Server
 let cloudTierBaseUrl: string
 let fakeUpstream: import('node:http').Server
+let fakeUpstreamPort: number
 let fakeUpstreamBehavior: 'ok' | 'upstream-error' = 'ok'
 
 before(async () => {
@@ -68,6 +69,7 @@ before(async () => {
   await new Promise<void>((resolve) => fakeUpstream.listen(0, '127.0.0.1', () => resolve()))
   const upstreamAddress = fakeUpstream.address()
   const upstreamPort = typeof upstreamAddress === 'object' && upstreamAddress ? upstreamAddress.port : 0
+  fakeUpstreamPort = upstreamPort
 
   const cloudServer = createPlatformServer({
     port: 0,
@@ -419,4 +421,50 @@ test('cloud smart tier rejects a malformed messages array', async () => {
   const { status, body } = await cloudApi('/smart-tier/chat', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user' }] }) }, humanJwt)
   assert.equal(status, 400)
   assert.match(body.error, /messages/)
+})
+
+// Zero-terminal settings: the admin configures the cloud tier's API key
+// from the Control Center (POST /settings/cloud-tier), not by editing
+// platform/.env by hand -- and it takes effect on the very next chat
+// message, no restart. Run against the plain `httpServer` (statically
+// configured with cloudTier: null) specifically to prove the database is
+// what turns the feature on, not the env var.
+
+test('cloud tier settings start out not configured', async () => {
+  const { status, body } = await api('/settings/cloud-tier', {}, humanJwt)
+  assert.equal(status, 200)
+  assert.equal(body.configured, false)
+})
+
+test('a non-admin cannot save platform settings', async () => {
+  const strangerId = randomUUID()
+  await getPool().query('INSERT INTO auth.users (id, email) VALUES ($1, $2)', [strangerId, 'settings-stranger@test.local'])
+  const strangerJwt = signTestJwt(strangerId)
+
+  const { status, body } = await api('/settings/cloud-tier', { method: 'POST', body: JSON.stringify({ api_key: 'nope' }) }, strangerJwt)
+  assert.equal(status, 403)
+  assert.match(body.error, /admin/)
+})
+
+test('an admin saves a cloud-tier key from the settings API and it works immediately, no restart', async () => {
+  fakeUpstreamBehavior = 'ok'
+
+  const save = await api(
+    '/settings/cloud-tier',
+    { method: 'POST', body: JSON.stringify({ api_key: 'db-stored-key', url: `http://127.0.0.1:${fakeUpstreamPort}`, model: 'db-model' }) },
+    humanJwt,
+  )
+  assert.equal(save.status, 200)
+  assert.equal(save.body.success, true)
+
+  const status = await api('/settings/cloud-tier', {}, humanJwt)
+  assert.equal(status.body.configured, true)
+  assert.equal(status.body.model, 'db-model')
+
+  // The plain httpServer was created with cloudTier: null -- this only
+  // works at all because resolveCloudTierConfig reads the database.
+  const chat = await api('/smart-tier/chat', { method: 'POST', body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) }, humanJwt)
+  assert.equal(chat.status, 200)
+  assert.equal(chat.body.content, 'fake 70B reply')
+  assert.equal(chat.body.model, 'db-model')
 })

@@ -19,12 +19,19 @@
 //     OpenAI-compatible server instead of a free-tier provider -- no code
 //     change needed.
 
+import { readCloudTierSecret } from './settings.js'
+
 export type CloudTierConfig = {
   url: string
   model: string
   apiKey: string
 }
 
+// An env-var default, kept for operators who still prefer setting this in
+// platform/.env (e.g. before ever signing in to configure it from the
+// Settings page). The database (platform_settings, edited from the
+// Control Center -- see resolveCloudTierConfig below) always takes
+// precedence when both are set.
 export function loadCloudTierConfig(env: NodeJS.ProcessEnv): CloudTierConfig | null {
   const apiKey = env.CLOUD_TIER_API_KEY
   if (!apiKey) return null
@@ -33,6 +40,22 @@ export function loadCloudTierConfig(env: NodeJS.ProcessEnv): CloudTierConfig | n
     model: env.CLOUD_TIER_MODEL || 'llama-3.3-70b-versatile',
     apiKey,
   }
+}
+
+// Called per-request (not cached) so saving a new key from the Settings
+// page takes effect on the very next chat message -- no restart, no
+// redeploy. A DB lookup per request is negligible cost at this scale and
+// keeps this honestly correct rather than eventually-consistent.
+export async function resolveCloudTierConfig(fallback: CloudTierConfig | null): Promise<CloudTierConfig | null> {
+  const stored = await readCloudTierSecret()
+  if (stored) {
+    return {
+      apiKey: stored.apiKey,
+      url: stored.url || fallback?.url || 'https://api.groq.com/openai/v1',
+      model: stored.model || fallback?.model || 'llama-3.3-70b-versatile',
+    }
+  }
+  return fallback
 }
 
 export type CloudTierMessage = { role: string; content: string }

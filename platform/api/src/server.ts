@@ -1,9 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { callCloudTier, type CloudTierConfig } from './cloudTier.js'
+import { callCloudTier, resolveCloudTierConfig, type CloudTierConfig } from './cloudTier.js'
 import { getPool, withUserSession } from './db.js'
 import { verifyJwt } from './jwt.js'
 import { toVectorLiteral, validateEmbedding } from './memory.js'
 import { authenticateDevice, createPairingCode, ensureHumanUser, exchangePairingCode, recordHeartbeat } from './pairing.js'
+import { getCloudTierStatus, saveCloudTierSettings } from './settings.js'
 
 export type PlatformConfig = {
   port: number
@@ -372,9 +373,11 @@ export function createPlatformServer(config: PlatformConfig) {
       // local-runtime or the frontend. Any authenticated user of this
       // platform can call it; there is no separate opt-in flag on the user
       // record because the tier as a whole is already opt-in at the
-      // deployment level (CLOUD_TIER_API_KEY unset = route always 503s).
+      // deployment level (nothing configured, neither in the database nor
+      // CLOUD_TIER_API_KEY, = route always 503s).
       if (path === '/smart-tier/chat' && req.method === 'POST') {
-        if (!config.cloudTier) {
+        const cloudTier = await resolveCloudTierConfig(config.cloudTier)
+        if (!cloudTier) {
           return send(res, 503, { success: false, error: 'Cloud smart tier is not configured on this deployment.' })
         }
         const body = await readJsonBody(req)
@@ -382,11 +385,41 @@ export function createPlatformServer(config: PlatformConfig) {
         if (!messages || messages.some((m) => typeof m?.role !== 'string' || typeof m?.content !== 'string')) {
           return send(res, 400, { success: false, error: 'messages must be an array of {role, content}.' })
         }
-        const result = await callCloudTier(config.cloudTier, messages)
+        const result = await callCloudTier(cloudTier, messages)
         if (!result.ok) {
           return send(res, result.status, { success: false, error: result.error })
         }
-        return send(res, 200, { success: true, content: result.content, model: config.cloudTier.model })
+        return send(res, 200, { success: true, content: result.content, model: cloudTier.model })
+      }
+
+      // Admin-only settings for the cloud smart tier, backed by the
+      // platform_settings table (RLS-gated to is_admin()) rather than an
+      // env file -- this is what lets the Control Center's Settings page
+      // configure it with no terminal step. The raw key is write-only:
+      // GET never returns it, only whether one is currently set.
+      if (path === '/settings/cloud-tier' && req.method === 'GET') {
+        const status = await getCloudTierStatus(identity.userId)
+        return send(res, 200, status)
+      }
+
+      if (path === '/settings/cloud-tier' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : ''
+        if (!apiKey) return send(res, 400, { success: false, error: 'api_key is required.' })
+        try {
+          await saveCloudTierSettings(identity.userId, {
+            apiKey,
+            url: typeof body.url === 'string' && body.url.trim() ? body.url.trim() : undefined,
+            model: typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined,
+          })
+        } catch (error) {
+          const code = (error as { code?: string } | null)?.code
+          if (code === '42501') {
+            return send(res, 403, { success: false, error: 'Only an admin can change platform settings.' })
+          }
+          throw error
+        }
+        return send(res, 200, { success: true })
       }
 
       send(res, 404, { success: false, error: `No route for ${req.method} ${path}` })

@@ -92,3 +92,26 @@ export async function cloudTierChat(messages: { role: string; content: string }[
   }
   return { ok: true, content: data.content, model: data.model ?? 'cloud' }
 }
+
+// Admin-only, zero-terminal configuration for the cloud smart tier: saved
+// to the database (platform_settings, RLS-gated to admins) from the
+// Control Center's Settings page instead of editing platform/.env by
+// hand. Takes effect on the very next chat message, no redeploy.
+export type CloudTierStatus = { configured: boolean; model: string | null; url: string | null }
+
+export async function getCloudTierStatus(): Promise<CloudTierStatus> {
+  const res = await platformFetch('/settings/cloud-tier')
+  if (!res?.ok) return { configured: false, model: null, url: null }
+  return (await res.json()) as CloudTierStatus
+}
+
+export async function saveCloudTierSettings(settings: { apiKey: string; url?: string; model?: string }): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await platformFetch('/settings/cloud-tier', {
+    method: 'POST',
+    body: JSON.stringify({ api_key: settings.apiKey, url: settings.url, model: settings.model }),
+  })
+  if (!res) return { ok: false, error: 'Platform server is not configured.' }
+  const data = (await res.json()) as { success?: boolean; error?: string }
+  if (!res.ok || !data.success) return { ok: false, error: data.error ?? `Save failed (HTTP ${res.status}).` }
+  return { ok: true }
+}

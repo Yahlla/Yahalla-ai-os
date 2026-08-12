@@ -1182,6 +1182,103 @@ function HealthSection() {
   )
 }
 
+function CloudTierSettingsCard() {
+  const [status, setStatus] = useState<platformApi.CloudTierStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [apiKey, setApiKey] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [url, setUrl] = useState('')
+  const [model, setModel] = useState('')
+
+  function load() {
+    setLoading(true)
+    platformApi.getCloudTierStatus().then(setStatus).finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  async function handleSave(event: FormEvent) {
+    event.preventDefault()
+    if (!apiKey.trim()) return
+    setSaving(true)
+    setError('')
+    const result = await platformApi.saveCloudTierSettings({
+      apiKey: apiKey.trim(),
+      url: url.trim() || undefined,
+      model: model.trim() || undefined,
+    })
+    setSaving(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    setApiKey('')
+    load()
+  }
+
+  if (!platformApi.isPlatformApiConfigured()) return null
+
+  return (
+    <div className="info-panel" style={{ marginTop: 20 }}>
+      <div className="info-panel-header">
+        <Sparkles size={18} />
+        <span>Cloud Smart Tier (70B, opt-in)</span>
+        {!loading && status && (
+          <span className={`status-badge ${status.configured ? 'badge-success' : 'badge-unknown'}`} style={{ marginInlineStart: 'auto' }}>
+            {status.configured ? `Connected · ${status.model ?? 'configured'}` : 'Not configured'}
+          </span>
+        )}
+      </div>
+      <div className="info-panel-body">
+        <p className="data-card-desc" style={{ marginBottom: 12 }}>
+          Free-tier 70B-class model as an optional escalation, kept server-side only -- the key never leaves this
+          server or reaches the browser. Get a free key at{' '}
+          <a href="https://console.groq.com" target="_blank" rel="noreferrer">console.groq.com</a>.
+        </p>
+        {error && <p className="data-card-desc" style={{ color: '#fca5a5', marginBottom: 8 }}>{error}</p>}
+        <form onSubmit={handleSave}>
+          <input
+            className="text-input"
+            type="password"
+            placeholder={status?.configured ? 'Replace saved key…' : 'Groq API key (gsk_...)'}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            style={{ width: '100%', marginBottom: 8 }}
+          />
+          <button type="button" className="mini-button" onClick={() => setShowAdvanced((v) => !v)} style={{ marginBottom: 8 }}>
+            {showAdvanced ? 'Hide' : 'Show'} advanced options
+          </button>
+          {showAdvanced && (
+            <>
+              <input
+                className="text-input"
+                placeholder="Upstream URL (default: Groq's OpenAI-compatible endpoint)"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                style={{ width: '100%', marginBottom: 8 }}
+              />
+              <input
+                className="text-input"
+                placeholder="Model (default: llama-3.3-70b-versatile)"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                style={{ width: '100%', marginBottom: 8 }}
+              />
+            </>
+          )}
+          <button type="submit" className="primary-button" disabled={saving || !apiKey.trim()}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 function SettingsSection() {
   return (
     <div className="admin-section">
@@ -1217,6 +1314,7 @@ function SettingsSection() {
           </div>
         </div>
       </div>
+      <CloudTierSettingsCard />
     </div>
   )
 }

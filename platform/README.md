@@ -6,6 +6,17 @@ This never runs AI inference -- every user's chat/agent work executes on
 their own device (browser WebGPU or the Electron/local-runtime app). See
 `docs/ARCHITECTURE.md` for how this fits into the rest of the system.
 
+## Zero-terminal policy
+
+`scripts/setup-strato.sh` is the *only* terminal session this project ever
+asks for -- a one-time bootstrap. Every feature, integration, or setting
+built after initial setup must be configurable and observable entirely
+from the Control Center's UI (a form + a save button + a live status
+indicator), never by SSHing in to edit a file. The cloud smart tier's
+Settings page (below) is the reference example of this pattern: a
+database-backed setting (not an env file), a save action, and a status
+badge that updates the moment it's saved.
+
 ## Components
 
 - `db/` -- Postgres schema: an `auth`/extension shim (`00_auth_shim.sql`,
@@ -71,12 +82,18 @@ as its own narrow thing, not folded into local-runtime's `chatCompletion`:
   OpenAI-compatible server later (vLLM, llama.cpp's server, Ollama) instead
   of a free-tier provider -- no code change, just `platform/.env`.
 
-To enable: get a free API key from https://console.groq.com, add to
-`platform/.env`:
+**To enable, no terminal needed:** get a free API key from
+https://console.groq.com, then sign in to the Control Center as the
+platform owner/admin and paste it into **Settings → Cloud Smart Tier**.
+Saved to the `platform_settings` table (RLS-gated to `is_admin()`, see the
+`20260815000000_platform_settings.sql` migration and `api/src/settings.ts`)
+and takes effect on the very next chat message -- no restart, no redeploy.
+The Settings page also shows a live "Connected · &lt;model&gt;" badge the
+moment it's saved.
 
-```
-CLOUD_TIER_API_KEY=gsk_...
-```
+`CLOUD_TIER_API_KEY` in `platform/.env` still works as a bootstrap
+default for operators who prefer it, but the database always wins when
+both are set (`cloudTier.ts`'s `resolveCloudTierConfig`).
 
 then `cd platform && docker compose --env-file .env up -d --build`.
 
