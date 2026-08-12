@@ -1346,6 +1346,54 @@ button {
   margin-top: 14px;
 }
 
+.call-modal-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 16px;
+}
+
+.call-orb {
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--accent-2, #5ee0ff);
+  background: rgba(94,224,255,.08);
+  border: 1px solid rgba(94,224,255,.2);
+  transition: .2s ease;
+}
+
+.call-orb.listening {
+  color: #fca5a5;
+  background: rgba(239,68,68,.1);
+  border-color: rgba(239,68,68,.25);
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+
+.call-orb.thinking {
+  color: var(--accent-1, #7c6cff);
+  background: rgba(124,108,255,.1);
+  border-color: rgba(124,108,255,.25);
+  animation: call-orb-spin 1.6s linear infinite;
+}
+
+.call-orb.speaking {
+  animation: mic-pulse 1s ease-in-out infinite;
+}
+
+@keyframes call-orb-spin {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+.call-status-text {
+  margin-top: 14px;
+  font-size: 13px;
+  color: rgba(255,255,255,.7);
+}
+
 @media (max-width: 900px) {
   .artifacts-panel {
     position: absolute;
@@ -1612,7 +1660,7 @@ button {
   min-height: 91px;
   position: relative;
   margin: auto;
-  padding: 11px 11px 9px 147px;
+  padding: 11px 11px 9px 181px;
   border: 1px solid rgba(255,255,255,.1);
   border-radius: 16px;
   background: linear-gradient(145deg, rgba(25,28,36,.94), rgba(13,15,20,.97));
@@ -1668,8 +1716,12 @@ button {
   animation: mic-pulse 1.4s ease-in-out infinite;
 }
 
-.composer-icon.cloud-boost {
+.composer-icon.call {
   left: 112px;
+}
+
+.composer-icon.cloud-boost {
+  left: 146px;
 }
 
 .composer-icon.cloud-boost.active {

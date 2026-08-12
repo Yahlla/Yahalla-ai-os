@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Activity, Bot, Camera, Check, ChevronRight, Circle as CircleHelp, Code2, Copy, Cpu, Download, FileText, FolderKanban, GitBranch, Laptop, LogOut, Menu, MessageSquare, Mic, MicOff, Monitor, Paperclip, Plus, RotateCcw, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
+import { Activity, Bot, Camera, Check, ChevronRight, Circle as CircleHelp, Code2, Copy, Cpu, Download, FileText, FolderKanban, GitBranch, Laptop, LogOut, Menu, MessageSquare, Mic, MicOff, Monitor, Paperclip, Phone, PhoneOff, Plus, RotateCcw, Search, Send, Server, Settings, Shield, ShieldCheck, Sparkles, Terminal, Users, Wrench, X, Zap } from 'lucide-react'
 import './App.css'
 import { supabase } from './lib/supabase'
 import { signIn, signOut, signUp } from './lib/auth'
@@ -10,6 +10,7 @@ import * as browserRuntime from './lib/browserRuntime'
 import * as platformApi from './lib/platformApi'
 import { requestMediaPermission } from './lib/capabilities'
 import { createVoiceRecognizer, isSpeechRecognitionSupported, type VoiceRecognizer } from './lib/voiceInput'
+import * as voiceOutput from './lib/voiceOutput'
 import type { BrowserChatMessage } from './lib/browserLLM'
 import type {
   Agent,
@@ -1615,6 +1616,18 @@ function ChatSection() {
   const [isListening, setIsListening] = useState(false)
   const [voiceError, setVoiceError] = useState('')
   const voiceRecognizerRef = useRef<VoiceRecognizer | null>(null)
+  // Voice Call mode: hands-free listen -> think -> speak -> listen again
+  // loop, distinct from the one-shot mic-to-composer dictation above. A
+  // ref mirrors callModeOpen because the loop is driven by imperative
+  // Web Speech API callbacks (speechSynthesis.onend, recognizer.onresult)
+  // that fire outside React's render cycle -- reading stale state there
+  // would keep the loop going after the user has already ended the call.
+  const [callModeOpen, setCallModeOpen] = useState(false)
+  const callModeOpenRef = useRef(false)
+  const [callStatus, setCallStatus] = useState<'listening' | 'thinking' | 'speaking'>('listening')
+  const [callError, setCallError] = useState('')
+  const callRecognizerRef = useRef<VoiceRecognizer | null>(null)
+  const callSpeechRef = useRef<voiceOutput.SpeechHandle | null>(null)
   const [cameraOpen, setCameraOpen] = useState(false)
   const [cameraError, setCameraError] = useState('')
   const [capturedImage, setCapturedImage] = useState<string | null>(null)
@@ -1659,6 +1672,17 @@ function ChatSection() {
   useEffect(() => {
     return () => {
       cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
+    }
+  }, [])
+
+  // Same reasoning as the camera cleanup above: a live mic + speech
+  // synthesis must stop on unmount, not keep running with no UI left to
+  // end the call from.
+  useEffect(() => {
+    return () => {
+      callModeOpenRef.current = false
+      callRecognizerRef.current?.stop()
+      callSpeechRef.current?.cancel()
     }
   }, [])
 
@@ -1924,6 +1948,90 @@ function ChatSection() {
     recognizer.start()
   }
 
+  // Voice Call mode: a hands-free listen -> send -> speak -> listen again
+  // loop, layered on top of the same sendMessage/three-tier fallback used
+  // everywhere else -- it does not duplicate any of that logic, it just
+  // feeds sendMessage a transcript instead of the composer's input, and
+  // speaks whatever answer comes back instead of only rendering it.
+
+  function startCallListening() {
+    if (!callModeOpenRef.current) return
+    setCallError('')
+    setCallStatus('listening')
+    const recognizer = createVoiceRecognizer({
+      lang: 'ar-SA',
+      onTranscript: (text, isFinal) => {
+        if (!isFinal || !text.trim()) return
+        callRecognizerRef.current?.stop()
+        callRecognizerRef.current = null
+        setCallStatus('thinking')
+        void sendMessage(undefined, text.trim())
+      },
+      onEnd: () => {
+        callRecognizerRef.current = null
+      },
+      onError: (message) => {
+        callRecognizerRef.current = null
+        if (callModeOpenRef.current) setCallError(message)
+      },
+    })
+    if (!recognizer) {
+      setCallError('تعذّر بدء التعرف على الصوت.')
+      return
+    }
+    callRecognizerRef.current = recognizer
+    recognizer.start()
+  }
+
+  async function speakCallReply(text: string) {
+    if (!callModeOpenRef.current) return
+    setCallStatus('speaking')
+    try {
+      const handle = await voiceOutput.speak(text, {
+        lang: 'ar-SA',
+        onEnd: () => {
+          callSpeechRef.current = null
+          if (callModeOpenRef.current) startCallListening()
+        },
+        onError: (message) => {
+          callSpeechRef.current = null
+          if (callModeOpenRef.current) {
+            setCallError(message)
+            startCallListening()
+          }
+        },
+      })
+      callSpeechRef.current = handle
+    } catch {
+      if (callModeOpenRef.current) startCallListening()
+    }
+  }
+
+  async function startCall() {
+    setCallError('')
+    if (!isSpeechRecognitionSupported() || !voiceOutput.isSpeechSynthesisSupported()) {
+      setCallError('المكالمة الصوتية غير مدعومة في هذا المتصفح.')
+      return
+    }
+    const granted = await requestMediaPermission('microphone')
+    if (!granted) {
+      setCallError('تم رفض إذن الميكروفون.')
+      return
+    }
+    callModeOpenRef.current = true
+    setCallModeOpen(true)
+    startCallListening()
+  }
+
+  function endCall() {
+    callModeOpenRef.current = false
+    callRecognizerRef.current?.stop()
+    callRecognizerRef.current = null
+    callSpeechRef.current?.cancel()
+    callSpeechRef.current = null
+    setCallModeOpen(false)
+  }
+
   function stopCameraStream() {
     cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
     cameraStreamRef.current = null
@@ -1980,9 +2088,9 @@ function ChatSection() {
     closeCamera()
   }
 
-  async function sendMessage(event?: FormEvent) {
+  async function sendMessage(event?: FormEvent, voiceText?: string) {
     event?.preventDefault()
-    const typed = input.trim()
+    const typed = (voiceText ?? input).trim()
     if ((!typed && attachedFiles.length === 0 && !pendingImage) || sending) return
 
     // Attached files are read client-side (never uploaded anywhere on
@@ -2002,7 +2110,7 @@ function ChatSection() {
     const message = (typed || `(${attachedFiles.length + (pendingImage ? 1 : 0)} attachment(s), no message)`) + fileContext + imageContext
     const attachmentsForDisplay = attachedFiles.map((f) => ({ name: f.name, size: f.size }))
 
-    setInput('')
+    if (!voiceText) setInput('')
     setAttachedFiles([])
     setAttachmentError('')
     setPendingImage(null)
@@ -2147,6 +2255,15 @@ function ChatSection() {
 
       const newArtifacts = extractArtifacts(finalMessageId, assistantContent)
       if (newArtifacts.length > 0) setActiveArtifactId(newArtifacts[newArtifacts.length - 1]!.id)
+
+      // Voice Call mode: this message originated from the call's own
+      // listen loop (voiceText set), so speak the reply and, once done,
+      // start listening for the next turn -- see speakCallReply/
+      // startCallListening above. A message sent normally through the
+      // composer while a call happens to be open is never spoken.
+      if (voiceText && callModeOpenRef.current) {
+        void speakCallReply(assistantContent)
+      }
 
       // Persisted on Strato independently of which tier answered --
       // deliberately not awaited: persistence latency must never be what
@@ -2467,6 +2584,29 @@ function ChatSection() {
           {voiceError && <div className="composer-error">{voiceError}</div>}
           {cameraError && <div className="composer-error">{cameraError}</div>}
 
+          {callModeOpen && (
+            <div className="camera-modal">
+              <div className="camera-modal-inner call-modal-inner">
+                <div className={`call-orb ${callStatus}`}>
+                  {callStatus === 'listening' && <Mic size={28} />}
+                  {callStatus === 'thinking' && <Sparkles size={28} />}
+                  {callStatus === 'speaking' && <Phone size={28} />}
+                </div>
+                <div className="call-status-text">
+                  {callStatus === 'listening' && 'يستمع…'}
+                  {callStatus === 'thinking' && 'يفكر…'}
+                  {callStatus === 'speaking' && 'يتحدث…'}
+                </div>
+                {callError && <div className="composer-error">{callError}</div>}
+                <div className="camera-modal-actions">
+                  <button type="button" className="secondary-button" onClick={endCall}>
+                    <PhoneOff size={14} /> End Call
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {cameraOpen && (
             <div className="camera-modal">
               <div className="camera-modal-inner">
@@ -2521,6 +2661,11 @@ function ChatSection() {
             <button type="button" className="composer-icon camera" onClick={openCamera} title="Take a photo">
               <Camera size={18} />
             </button>
+            {isSpeechRecognitionSupported() && voiceOutput.isSpeechSynthesisSupported() && (
+              <button type="button" className="composer-icon call" onClick={startCall} title="Start a hands-free voice call">
+                <Phone size={18} />
+              </button>
+            )}
             {platformApi.isPlatformApiConfigured() && (
               <button
                 type="button"
