@@ -2022,6 +2022,11 @@ function ChatSection() {
       setCallError('المكالمة الصوتية غير مدعومة في هذا المتصفح.')
       return
     }
+    // Must happen synchronously inside this click handler, before any
+    // await -- see voiceOutput.unlock()'s comment. Every speak() call for
+    // the rest of the call happens later, from inside async callbacks,
+    // and would otherwise be silently swallowed on iOS Safari.
+    voiceOutput.unlock()
     const granted = await requestMediaPermission('microphone')
     if (!granted) {
       setCallError('تم رفض إذن الميكروفون.')
@@ -2049,23 +2054,39 @@ function ChatSection() {
   async function openCamera() {
     setCameraError('')
     setCapturedImage(null)
-    const granted = await requestMediaPermission('camera')
-    if (!granted) {
-      setCameraError('تم رفض إذن الكاميرا.')
-      return
-    }
+    // A single getUserMedia call -- it prompts for permission itself, so
+    // a separate requestMediaPermission pre-check (as microphone/voice
+    // input use) would mean opening and immediately stopping one stream
+    // just to open a second one right after, which on several mobile
+    // browsers leaves the camera hardware in a brief "still releasing"
+    // state and produces a genuinely black <video> even though playback
+    // technically starts. One call avoids that race entirely.
+    let stream: MediaStream
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-      cameraStreamRef.current = stream
-      setCameraOpen(true)
-      // The <video> element only exists once cameraOpen renders it --
-      // assign the stream on the next tick rather than racing the render.
-      setTimeout(() => {
-        if (videoRef.current) videoRef.current.srcObject = stream
-      }, 0)
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
     } catch {
-      setCameraError('تعذّر الوصول إلى الكاميرا.')
+      try {
+        // 'environment' has nothing to match on most laptops/desktops
+        // (no rear camera) -- retry with no facing preference so the
+        // single available webcam still works instead of failing outright.
+        stream = await navigator.mediaDevices.getUserMedia({ video: true })
+      } catch {
+        setCameraError('تم رفض إذن الكاميرا أو تعذّر الوصول إليها.')
+        return
+      }
     }
+    cameraStreamRef.current = stream
+    setCameraOpen(true)
+    // The <video> element only exists once cameraOpen renders it --
+    // assign the stream on the next tick rather than racing the render.
+    // Some browsers (notably iOS Safari) don't reliably autoplay a
+    // srcObject assigned this way without an explicit play() call.
+    setTimeout(() => {
+      const video = videoRef.current
+      if (!video) return
+      video.srcObject = stream
+      video.play().catch(() => {})
+    }, 0)
   }
 
   function stopGestureDetector() {

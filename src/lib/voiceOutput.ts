@@ -9,6 +9,21 @@ export function isSpeechSynthesisSupported(): boolean {
 
 export type SpeechHandle = { cancel: () => void }
 
+// iOS Safari (and some other WebKit builds) only lets speechSynthesis
+// actually produce audio the first time speak() runs synchronously inside
+// a real user-gesture event handler (a click). Every later speak() call
+// from inside an async callback -- which is exactly how the call loop
+// naturally speaks each reply, after an awaited network response -- gets
+// silently swallowed unless the engine was already "unlocked" this way
+// once. Call this directly inside the triggering button's onClick,
+// before any `await`, not from anywhere async.
+export function unlock(): void {
+  if (!isSpeechSynthesisSupported()) return
+  const utterance = new SpeechSynthesisUtterance(' ')
+  utterance.volume = 0
+  window.speechSynthesis.speak(utterance)
+}
+
 // Voice lists load asynchronously in some browsers (Chrome fires
 // `voiceschanged` once populated) -- this waits for that once, briefly,
 // rather than silently speaking with the browser's bare default voice

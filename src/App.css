@@ -2124,6 +2124,29 @@ button {
     padding: 0 6px;
   height: 30px;
   }
+
+  /* Five composer icons at the default 34px pitch eat too much width on
+     a phone screen and visibly crowd/overflow the input -- tighten the
+     pitch and shrink the icons themselves instead of hiding any of them. */
+  .composer {
+    padding-left: 146px;
+  }
+
+  .composer-icon {
+    width: 25px;
+    height: 25px;
+  }
+
+  .composer-icon svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  .composer-icon.attach { left: 8px; }
+  .composer-icon.mic { left: 36px; }
+  .composer-icon.camera { left: 64px; }
+  .composer-icon.call { left: 92px; }
+  .composer-icon.cloud-boost { left: 120px; }
 }
 
 .pairing-code {
