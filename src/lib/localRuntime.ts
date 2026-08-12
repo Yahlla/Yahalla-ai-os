@@ -157,6 +157,44 @@ export async function subscribeLiveStatus(onUpdate: (update: LiveUpdate) => void
   return () => controller.abort()
 }
 
+// Remote command dispatch (task #78-81): pairs THIS machine's local Agent
+// Runtime against a platform-api deployment so a task created from any
+// other browser/device can be routed here and run with this machine's own
+// real file/git/tool access (see local-runtime/src/taskPoller.ts). This
+// call only ever succeeds when made from a browser tab on the same machine
+// the runtime is running on -- runtimeFetch throws otherwise, the same way
+// every other local-runtime call here does.
+export async function pairThisRuntime(platformApiUrl: string, code: string, deviceName: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const response = await runtimeFetch('/device/pair', {
+      method: 'POST',
+      body: JSON.stringify({ platform_api_url: platformApiUrl, code, device_name: deviceName }),
+    })
+    const result = (await response.json()) as { success?: boolean; error?: string }
+    if (!response.ok || !result.success) return { ok: false, error: result.error ?? `Pairing failed (HTTP ${response.status}).` }
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'Local Agent Runtime is not reachable from this window.' }
+  }
+}
+
+export type RuntimeDeviceStatus = { paired: boolean; platformApiUrl: string | null }
+
+export async function getRuntimeDeviceStatus(): Promise<RuntimeDeviceStatus | null> {
+  try {
+    const response = await runtimeFetch('/device/status')
+    if (!response.ok) return null
+    const data = (await response.json()) as { paired: boolean; platform_api_url: string | null }
+    return { paired: data.paired, platformApiUrl: data.platform_api_url }
+  } catch {
+    return null
+  }
+}
+
+export async function unpairThisRuntime(): Promise<void> {
+  await runtimeFetch('/device/unpair', { method: 'POST' }).catch(() => {})
+}
+
 export async function decideApproval(approvalId: string, decision: 'approve' | 'reject'): Promise<ChatResponse> {
   const response = await runtimeFetch(`/approvals/${approvalId}/decide`, {
     method: 'POST',

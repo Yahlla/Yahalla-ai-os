@@ -1739,6 +1739,15 @@ button {
   background: rgba(94,224,255,.14);
 }
 
+.composer-icon.device-task {
+  left: 180px;
+}
+
+.composer-icon.device-task.active {
+  color: #fbbf24;
+  background: rgba(251,191,36,.14);
+}
+
 .task-chip.cloud-boost-chip {
   border-color: rgba(94,224,255,.18);
   color: var(--accent-2, #5ee0ff);
@@ -2125,11 +2134,11 @@ button {
   height: 30px;
   }
 
-  /* Five composer icons at the default 34px pitch eat too much width on
-     a phone screen and visibly crowd/overflow the input -- tighten the
+  /* Up to six composer icons at the default 34px pitch eat too much width
+     on a phone screen and visibly crowd/overflow the input -- tighten the
      pitch and shrink the icons themselves instead of hiding any of them. */
   .composer {
-    padding-left: 146px;
+    padding-left: 174px;
   }
 
   .composer-icon {
@@ -2147,6 +2156,7 @@ button {
   .composer-icon.camera { left: 64px; }
   .composer-icon.call { left: 92px; }
   .composer-icon.cloud-boost { left: 120px; }
+  .composer-icon.device-task { left: 148px; }
 }
 
 .pairing-code {

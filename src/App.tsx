@@ -570,6 +570,89 @@ function isDeviceOnline(device: Device): boolean {
   return Date.now() - new Date(device.last_heartbeat_at).getTime() < 60_000
 }
 
+// One-click, zero-terminal pairing: gets a pairing code from platform-api
+// (POST /pair_device, using this browser's own Supabase session) and feeds
+// it straight into this same machine's local Agent Runtime (POST
+// /device/pair on 127.0.0.1) in the same click -- no code to copy, no
+// terminal, ever. Only works from a browser tab open on the machine that
+// should become remotely commandable; on a phone or a machine with no
+// local-runtime running, it fails with a clear "not reachable" message
+// instead of silently doing nothing.
+function RemoteAccessCard() {
+  const [status, setStatus] = useState<localRuntime.RuntimeDeviceStatus | null>(null)
+  const [checking, setChecking] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  function refresh() {
+    setChecking(true)
+    localRuntime.getRuntimeDeviceStatus().then(setStatus).finally(() => setChecking(false))
+  }
+
+  useEffect(() => {
+    refresh()
+  }, [])
+
+  if (!platformApi.isPlatformApiConfigured()) return null
+
+  async function enable() {
+    setBusy(true)
+    setError('')
+    try {
+      const codeResult = await platformApi.requestDevicePairingCode('This Computer')
+      if (!codeResult.ok) throw new Error(codeResult.error)
+      const platformApiUrl = platformApi.getPlatformApiUrl()
+      if (!platformApiUrl) throw new Error('Platform server is not configured.')
+      const pairResult = await localRuntime.pairThisRuntime(platformApiUrl, codeResult.code, 'This Computer')
+      if (!pairResult.ok) throw new Error(pairResult.error)
+      refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not enable remote access.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function disable() {
+    setBusy(true)
+    setError('')
+    try {
+      await localRuntime.unpairThisRuntime()
+      refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="data-card" style={{ marginBottom: 20 }}>
+      <div className="data-card-header">
+        <div className="data-card-icon"><Zap size={18} /></div>
+        <div className="data-card-title">
+          <div className="data-card-name">Remote access to this computer</div>
+          <div className="data-card-sub">
+            Lets you command this machine's real file/git/GitHub tools from any other browser or phone, once
+            paired here
+          </div>
+        </div>
+        {!checking && <StatusBadge status={status?.paired ? 'online' : 'offline'} />}
+      </div>
+      {error && <p className="data-card-desc" style={{ color: '#fca5a5' }}>{error}</p>}
+      <div className="data-card-actions">
+        {status?.paired ? (
+          <button className="mini-button reject" disabled={busy} onClick={disable}>
+            <X size={14} /> Disable
+          </button>
+        ) : (
+          <button className="mini-button approve" disabled={busy || checking} onClick={enable}>
+            <Zap size={14} /> {status === null && !checking ? 'Runtime not reachable here' : 'Enable on this computer'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function DevicesSection() {
   const [devices, setDevices] = useState<Device[]>([])
   const [loading, setLoading] = useState(true)
@@ -640,9 +723,11 @@ function DevicesSection() {
         <p>{devices.length} paired · runs project filesystem/git/command tools locally, no VPS</p>
       </div>
 
+      <RemoteAccessCard />
+
       <div className="data-card-actions" style={{ marginBottom: 20 }}>
         <button className="mini-button approve" disabled={pairingBusy} onClick={connectDevice}>
-          <Laptop size={14} /> Connect this device
+          <Laptop size={14} /> Connect this device (manual, via device-agent)
         </button>
       </div>
 
@@ -1693,13 +1778,20 @@ function ChatSection() {
   const [modelLoadProgress, setModelLoadProgress] = useState<{ progress: number; text: string } | null>(null)
   const [modelLoadStalled, setModelLoadStalled] = useState(false)
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null)
-  const [runtimeTier, setRuntimeTier] = useState<'local' | 'browser' | 'cloud' | null>(null)
+  const [runtimeTier, setRuntimeTier] = useState<'local' | 'browser' | 'cloud' | 'device' | null>(null)
   // Explicit, user-toggled escalation to the opt-in cloud smart tier (see
   // platform/api/src/cloudTier.ts) -- distinct from runtimeTier's 'cloud',
   // which is the legacy last-resort fallback when no on-device path exists
   // at all. This one is always a deliberate choice, never automatic, and
   // only ever available when platform-api is configured.
   const [cloudBoostEnabled, setCloudBoostEnabled] = useState(false)
+  // Explicit escalation to a paired device's real file/git/GitHub tools
+  // (task #78-81) -- lets any browser/phone command a machine you've
+  // enabled remote access on (see RemoteAccessCard), the same way this
+  // very Claude Code session can touch real files. Mutually meaningful
+  // with cloudBoostEnabled but checked first below: real tool access beats
+  // a bigger model when both are on.
+  const [deviceTaskEnabled, setDeviceTaskEnabled] = useState(false)
   const browserHistoryRef = useRef<BrowserChatMessage[]>([])
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -2297,7 +2389,43 @@ function ChatSection() {
         return { success: false, error: cloudResult.error }
       }
 
-      if (cloudBoostEnabled && platformApi.isPlatformApiConfigured()) {
+      // Dispatches this message as a real task to a paired, online device
+      // (see RemoteAccessCard/local-runtime's taskPoller) and polls until
+      // it finishes -- the same request/response shape as a normal chat
+      // reply, just executed with real file/git/GitHub tool access on
+      // whichever machine is paired, not in this browser tab.
+      async function callDeviceTask(): Promise<ChatResponse> {
+        const created = await platformApi.createDeviceTask(message)
+        if (!created.ok) return { success: false, error: created.error }
+        const taskId = created.task.id
+        const deadline = Date.now() + 120_000
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 2000))
+          const task = await platformApi.getTask(taskId)
+          if (!task) continue
+          if (task.status === 'completed') {
+            return {
+              success: true,
+              answer: task.output?.answer || 'Done.',
+              executed_tools: task.output?.executedTools?.map((t, i) => ({ ...t, execution_id: `${taskId}:${i}` })),
+              conversation_id: conversationId ?? undefined,
+            }
+          }
+          if (task.status === 'failed') {
+            return { success: false, error: task.error || 'The paired device could not complete this task.' }
+          }
+          // queued/running -- keep polling
+        }
+        return {
+          success: false,
+          error: 'Timed out waiting for the paired device (2 minutes). It may still finish -- check the Devices page.',
+        }
+      }
+
+      if (deviceTaskEnabled && platformApi.isPlatformApiConfigured()) {
+        setRuntimeTier('device')
+        result = await callDeviceTask()
+      } else if (cloudBoostEnabled && platformApi.isPlatformApiConfigured()) {
         // Deliberate escalation, not a fallback: still tries this even if
         // local-runtime/browser would also work, because the user
         // explicitly asked for the stronger model this turn.
@@ -2486,10 +2614,11 @@ function ChatSection() {
               {runtimeTier === 'local' && 'Local Runtime · Full speed on this device'}
               {runtimeTier === 'browser' && 'Browser Mode (WebGPU) · one-time download'}
               {runtimeTier === 'cloud' && 'Cloud fallback'}
+              {runtimeTier === 'device' && 'Remote Device · real file/git/GitHub access'}
               {runtimeTier === null && 'AI Orchestrator · Online'}
             </div>
           </div>
-          {runtimeTier && runtimeTier !== 'local' && (
+          {runtimeTier && runtimeTier !== 'local' && runtimeTier !== 'device' && (
             <a
               className="runtime-tier-cta"
               href="https://github.com/Yahlla/Yahalla-ai-os/blob/main/scripts/setup-local.sh"
@@ -2838,6 +2967,20 @@ function ChatSection() {
                 }
               >
                 <Sparkles size={18} />
+              </button>
+            )}
+            {platformApi.isPlatformApiConfigured() && (
+              <button
+                type="button"
+                className={`composer-icon device-task ${deviceTaskEnabled ? 'active' : ''}`}
+                onClick={() => setDeviceTaskEnabled((v) => !v)}
+                title={
+                  deviceTaskEnabled
+                    ? 'Remote Device is ON -- this message will run as a real task on your paired device'
+                    : 'Remote Device (off) -- click to run the next message as a real task on a paired device (Devices page)'
+                }
+              >
+                <Zap size={18} />
               </button>
             )}
             <textarea

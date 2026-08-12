@@ -1,3 +1,4 @@
+import type { Device } from './types'
 import { supabase } from './supabase'
 
 // Optional: the self-hosted Strato control plane (platform/api). Chat
@@ -10,6 +11,14 @@ const PLATFORM_API_URL = import.meta.env.VITE_PLATFORM_API_URL as string | undef
 
 export function isPlatformApiConfigured(): boolean {
   return Boolean(PLATFORM_API_URL)
+}
+
+// Needed by localRuntime.pairThisRuntime -- the local Agent Runtime's own
+// /device/pair endpoint has to be told which platform-api deployment to
+// register itself against, and that's this same URL the rest of this file
+// already talks to.
+export function getPlatformApiUrl(): string | null {
+  return PLATFORM_API_URL ?? null
 }
 
 async function authHeader(): Promise<Record<string, string> | null> {
@@ -114,4 +123,50 @@ export async function saveCloudTierSettings(settings: { apiKey: string; url?: st
   const data = (await res.json()) as { success?: boolean; error?: string }
   if (!res.ok || !data.success) return { ok: false, error: data.error ?? `Save failed (HTTP ${res.status}).` }
   return { ok: true }
+}
+
+// Real command dispatch to a paired device's own local Agent Runtime (task
+// #78-81): a human on ANY browser/device can ask for a task to run with the
+// full file/git/GitHub tool access that only a real machine has, by routing
+// it through platform-api's task queue to a device that's already paired
+// and polling (see local-runtime/src/taskPoller.ts).
+
+export async function requestDevicePairingCode(deviceName?: string): Promise<{ ok: true; code: string; expiresAt: string } | { ok: false; error: string }> {
+  const res = await platformFetch('/pair_device', { method: 'POST', body: JSON.stringify({ device_name: deviceName }) })
+  if (!res) return { ok: false, error: 'Platform server is not configured.' }
+  const data = (await res.json()) as { success?: boolean; pairing_code?: string; expires_at?: string; error?: string }
+  if (!res.ok || !data.success || !data.pairing_code || !data.expires_at) {
+    return { ok: false, error: data.error ?? `Failed to create a pairing code (HTTP ${res.status}).` }
+  }
+  return { ok: true, code: data.pairing_code, expiresAt: data.expires_at }
+}
+
+export async function listPlatformDevices(): Promise<Device[]> {
+  const res = await platformFetch('/devices')
+  if (!res?.ok) return []
+  const data = (await res.json()) as { devices?: Device[] }
+  return data.devices ?? []
+}
+
+export type PlatformTask = {
+  id: string
+  title: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | string
+  output: { answer?: string; executedTools?: { tool: string; arguments: Record<string, unknown>; result: Record<string, unknown> }[] } | null
+  error: string | null
+}
+
+export async function createDeviceTask(title: string, deviceId?: string): Promise<{ ok: true; task: PlatformTask } | { ok: false; error: string }> {
+  const res = await platformFetch('/tasks', { method: 'POST', body: JSON.stringify({ title, device_id: deviceId }) })
+  if (!res) return { ok: false, error: 'Platform server is not configured.' }
+  const data = (await res.json()) as { success?: boolean; task?: PlatformTask; error?: string }
+  if (!res.ok || !data.success || !data.task) return { ok: false, error: data.error ?? `Failed to create task (HTTP ${res.status}).` }
+  return { ok: true, task: data.task }
+}
+
+export async function getTask(taskId: string): Promise<PlatformTask | null> {
+  const res = await platformFetch(`/tasks/${taskId}`)
+  if (!res?.ok) return null
+  const data = (await res.json()) as { success?: boolean; task?: PlatformTask }
+  return data.task ?? null
 }
