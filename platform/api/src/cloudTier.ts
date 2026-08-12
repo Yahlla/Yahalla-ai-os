@@ -73,7 +73,13 @@ export async function callCloudTier(
     const response = await fetch(`${config.url}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
-      body: JSON.stringify({ model: config.model, messages }),
+      // A moderate temperature -- the provider's own default tends toward
+      // looser, more "creative" sampling that measurably increases
+      // random-language-word intrusions in otherwise-Arabic text (seen
+      // live: a stray Cyrillic/Chinese word inside an Arabic sentence).
+      // This doesn't change what the model knows, just how deterministically
+      // it picks among its own top candidate tokens.
+      body: JSON.stringify({ model: config.model, messages, temperature: 0.6 }),
       signal: controller.signal,
     })
     const text = await response.text()

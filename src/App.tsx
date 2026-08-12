@@ -1409,6 +1409,31 @@ type ChatMessage = {
   viaCloudBoost?: string
 }
 
+// The cloud smart tier gets no system prompt at all otherwise -- a raw
+// completion call with just user/assistant turns tends to drift into
+// whatever language dominates the visible history (observed live: a
+// German first message locked the model into German even after the user
+// switched to Arabic) and, at default sampling settings, occasionally
+// mixes stray words from an unrelated language into an Arabic sentence.
+// Mirrors browserRuntime.ts's own SYSTEM_PROMPT honesty rules (no file/
+// tool/Yahalla-data access in this mode either) plus an explicit
+// language-matching instruction the browser tier doesn't need as badly
+// since its conversations tend to be shorter and more consistent.
+const CLOUD_BOOST_SYSTEM_PROMPT = `
+You are Yahalla AI, answering via an opt-in cloud escalation to a stronger model -- not a cloud service with hidden server-side tools.
+
+Always reply in the same language the user's most recent message is written in. Default to Arabic when in doubt. Never mix words from an unrelated language into a sentence -- if you don't know a term, say it in the reply's own language instead of substituting a foreign word.
+
+What you can do: hold a conversation, answer general questions, explain things, help draft or reason through something the user describes to you directly in the chat.
+
+What you cannot do, ever, in this mode -- say so plainly the moment it's relevant, do not claim otherwise:
+- Read or write project files, run commands, or use git/GitHub.
+- See or query the user's actual Yahalla data: tasks, projects, servers, devices, approvals, or anything else stored in their account.
+- Anything requiring a live tool, sensor, or network call. You only ever see the text the user typed into this chat.
+
+Be concise and direct. Never guess or invent facts and present them as verified.
+`.trim()
+
 type AttachedFile = { name: string; content: string; size: number }
 
 const MAX_ATTACHMENT_BYTES = 200_000
@@ -2251,7 +2276,11 @@ function ChatSection() {
           .filter((m) => m.role === 'user' || m.role === 'assistant')
           .slice(-20)
           .map((m) => ({ role: m.role, content: m.content }))
-        const cloudResult = await platformApi.cloudTierChat([...history, { role: 'user', content: message }])
+        const cloudResult = await platformApi.cloudTierChat([
+          { role: 'system', content: CLOUD_BOOST_SYSTEM_PROMPT },
+          ...history,
+          { role: 'user', content: message },
+        ])
         if (cloudResult.ok) {
           usedCloudBoostModel = cloudResult.model
           return { success: true, answer: cloudResult.content, conversation_id: conversationId ?? undefined }
