@@ -18,9 +18,22 @@ echo "==> Applying auth/extension shims"
 $PSQL -f "$SCRIPT_DIR/00_auth_shim.sql"
 $PSQL -f "$SCRIPT_DIR/01_extension_shims.sql"
 
+# Tracks which migration files have already been applied to this database,
+# so re-running this script (e.g. after a code update, via setup-strato.sh)
+# only applies files it hasn't seen yet instead of re-running the whole
+# chain -- most of the exported Supabase dump's statements (plain ALTER
+# TABLE ADD CONSTRAINT, no IF NOT EXISTS) aren't safe to execute twice.
+$PSQL -c 'CREATE TABLE IF NOT EXISTS public._migrations_applied (filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());'
+
 echo "==> Applying supabase/migrations/*.sql"
 for migration in $(ls "$MIGRATIONS_DIR"/*.sql | sort); do
-  echo "  - $(basename "$migration")"
+  name=$(basename "$migration")
+  already=$($PSQL -tA -c "SELECT 1 FROM public._migrations_applied WHERE filename = '$name';")
+  if [ "$already" = "1" ]; then
+    echo "  - $name (already applied, skipping)"
+    continue
+  fi
+  echo "  - $name"
   # supabase_vault has no self-hosted equivalent and nothing in this
   # platform reads from it; the vault schema created above is enough for
   # any reference to resolve. MAINTAIN is stripped from GRANT lists for
@@ -33,6 +46,7 @@ for migration in $(ls "$MIGRATIONS_DIR"/*.sql | sort); do
     -e '/CREATE EXTENSION IF NOT EXISTS "pg_cron"/d' \
     -e 's/REFERENCES,TRIGGER,TRUNCATE,MAINTAIN/REFERENCES,TRIGGER,TRUNCATE/g' \
     "$migration" | $PSQL
+  $PSQL -c "INSERT INTO public._migrations_applied (filename) VALUES ('$name');"
 done
 
 echo "==> Schema applied."
