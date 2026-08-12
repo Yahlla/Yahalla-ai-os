@@ -15,6 +15,19 @@ const CLOUD_TIER_KEYS = {
   provider: 'cloud_tier_provider',
 } as const
 
+// Platform-level GitHub connection: one token, held server-side, used by
+// the coding agent (codingAgent.ts / githubCommit.ts) to read files and
+// push real branches/commits/PRs directly via the GitHub API -- no local
+// device, no local git clone, no local-runtime involved anywhere. This is
+// the server-side sibling of local-runtime's per-device GitHub connect
+// (task #82): same validate-before-store, never-echo-the-token shape, just
+// scoped to the whole platform instead of one person's own machine.
+const GITHUB_KEYS = {
+  token: 'github_token',
+  username: 'github_username',
+  defaultRepo: 'github_default_repo',
+} as const
+
 async function readSetting(client: pg.PoolClient, key: string): Promise<string | null> {
   const result = await client.query('SELECT value FROM platform_settings WHERE key = $1', [key])
   return (result.rows[0]?.value as string | undefined) ?? null
@@ -73,5 +86,41 @@ export async function readCloudTierSecret(): Promise<
     const model = await readSetting(client, CLOUD_TIER_KEYS.model)
     const provider = await readSetting(client, CLOUD_TIER_KEYS.provider)
     return { apiKey, url, model, provider: provider === 'anthropic' ? 'anthropic' : provider === 'openai' ? 'openai' : null }
+  })
+}
+
+export async function saveGithubSettings(userId: string, settings: { token: string; username: string; defaultRepo?: string }): Promise<void> {
+  await withUserSession(userId, async (client) => {
+    await writeSetting(client, GITHUB_KEYS.token, settings.token, userId)
+    await writeSetting(client, GITHUB_KEYS.username, settings.username, userId)
+    if (settings.defaultRepo) await writeSetting(client, GITHUB_KEYS.defaultRepo, settings.defaultRepo, userId)
+  })
+}
+
+export async function getGithubStatus(userId: string): Promise<{ configured: boolean; username: string | null; defaultRepo: string | null }> {
+  return withUserSession(userId, async (client) => {
+    const token = await readSetting(client, GITHUB_KEYS.token)
+    const username = await readSetting(client, GITHUB_KEYS.username)
+    const defaultRepo = await readSetting(client, GITHUB_KEYS.defaultRepo)
+    return { configured: Boolean(token), username: token ? username : null, defaultRepo }
+  })
+}
+
+export async function disconnectGithub(userId: string): Promise<void> {
+  await withUserSession(userId, async (client) => {
+    await client.query('DELETE FROM platform_settings WHERE key = ANY($1)', [[GITHUB_KEYS.token, GITHUB_KEYS.username]])
+  })
+}
+
+// Used internally by the coding-agent routes, which need the actual token
+// regardless of which admin is chatting -- same withServiceRole rationale
+// as readCloudTierSecret above.
+export async function readGithubSecret(): Promise<{ token: string; username: string | null; defaultRepo: string | null } | null> {
+  return withServiceRole(async (client) => {
+    const token = await readSetting(client, GITHUB_KEYS.token)
+    if (!token) return null
+    const username = await readSetting(client, GITHUB_KEYS.username)
+    const defaultRepo = await readSetting(client, GITHUB_KEYS.defaultRepo)
+    return { token, username, defaultRepo }
   })
 }

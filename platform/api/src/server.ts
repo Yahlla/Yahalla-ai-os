@@ -1,11 +1,19 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { runCodingAgent } from './codingAgent.js'
 import { callCloudTier, resolveCloudTierConfig, type CloudTierConfig } from './cloudTier.js'
 import { getPool, withServiceRole, withUserSession } from './db.js'
 import { proposeLatestDeployment, verifyGithubWebhookSignature } from './deployments.js'
 import { verifyJwt } from './jwt.js'
 import { toVectorLiteral, validateEmbedding } from './memory.js'
 import { authenticateDevice, createPairingCode, ensureHumanUser, exchangePairingCode, recordHeartbeat } from './pairing.js'
-import { getCloudTierStatus, saveCloudTierSettings } from './settings.js'
+import {
+  disconnectGithub,
+  getCloudTierStatus,
+  getGithubStatus,
+  readGithubSecret,
+  saveCloudTierSettings,
+  saveGithubSettings,
+} from './settings.js'
 
 export type PlatformConfig = {
   port: number
@@ -586,6 +594,98 @@ export function createPlatformServer(config: PlatformConfig) {
           throw error
         }
         return send(res, 200, { success: true })
+      }
+
+      // Platform-level GitHub connection: one token, held server-side, used
+      // by the coding agent below to read/commit real files directly via
+      // the GitHub API -- no local device involved anywhere. Same
+      // validate-before-store, never-echo-the-token shape as
+      // local-runtime's per-device GitHub connect (task #82), just scoped
+      // to the whole platform via platform_settings instead of one
+      // person's SQLite file.
+      if (path === '/settings/github' && req.method === 'GET') {
+        const status = await getGithubStatus(identity.userId)
+        return send(res, 200, status)
+      }
+
+      if (path === '/settings/github' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const token = typeof body.token === 'string' ? body.token.trim() : ''
+        if (!token) return send(res, 400, { success: false, error: 'A GitHub Personal Access Token is required.' })
+        const githubApiBase = process.env.GITHUB_API_BASE_URL ?? 'https://api.github.com'
+        let username: string | null = null
+        try {
+          const response = await fetch(`${githubApiBase}/user`, {
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'yahalla-ai-os-platform-api' },
+          })
+          if (!response.ok) {
+            return send(res, 400, {
+              success: false,
+              error: response.status === 401 ? 'GitHub rejected this token -- check it was copied correctly and has not expired.' : `GitHub API returned HTTP ${response.status}.`,
+            })
+          }
+          const user = (await response.json()) as { login?: string }
+          username = user.login ?? null
+        } catch (error) {
+          return send(res, 502, { success: false, error: error instanceof Error ? error.message : 'Could not reach GitHub to validate the token.' })
+        }
+        try {
+          await saveGithubSettings(identity.userId, {
+            token,
+            username: username ?? '',
+            defaultRepo: typeof body.default_repo === 'string' && body.default_repo.trim() ? body.default_repo.trim() : undefined,
+          })
+        } catch (error) {
+          const code = (error as { code?: string } | null)?.code
+          if (code === '42501') return send(res, 403, { success: false, error: 'Only an admin can change platform settings.' })
+          throw error
+        }
+        return send(res, 200, { success: true, username })
+      }
+
+      if (path === '/settings/github' && req.method === 'DELETE') {
+        try {
+          await disconnectGithub(identity.userId)
+        } catch (error) {
+          const code = (error as { code?: string } | null)?.code
+          if (code === '42501') return send(res, 403, { success: false, error: 'Only an admin can change platform settings.' })
+          throw error
+        }
+        return send(res, 200, { success: true })
+      }
+
+      // The zero-local-agent coding path: a human describes a change, this
+      // server explores the real repo and commits a real branch/PR itself
+      // via githubCommit.ts + codingAgent.ts -- entirely over the GitHub
+      // API, no local-runtime, no local git clone, no device pairing.
+      // Needs both a platform GitHub token (above) and a real Anthropic
+      // key configured as the cloud tier's provider (tool-use coding needs
+      // Claude specifically, independent of which provider answers plain
+      // chat messages).
+      if (path === '/code/request' && req.method === 'POST') {
+        if (identity.kind !== 'human') return send(res, 403, { success: false, error: 'Only a human can request a code change.' })
+        const github = await readGithubSecret()
+        if (!github) {
+          return send(res, 503, { success: false, error: 'No GitHub token configured. Add one in Settings -> GitHub Connection.' })
+        }
+        const cloud = await resolveCloudTierConfig(config.cloudTier)
+        if (!cloud || cloud.provider !== 'anthropic') {
+          return send(res, 503, { success: false, error: 'The coding agent needs a real Claude key configured in Settings -> Cloud Smart Tier (pick "Claude").' })
+        }
+        const body = await readJsonBody(req)
+        const repoInput = typeof body.repo === 'string' ? body.repo.trim() : github.defaultRepo ?? ''
+        const [owner, repo] = repoInput.split('/')
+        const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : ''
+        if (!owner || !repo) return send(res, 400, { success: false, error: 'repo is required, as "owner/name" (or set a default repo in Settings).' })
+        if (!instruction) return send(res, 400, { success: false, error: 'instruction is required.' })
+
+        const result = await runCodingAgent(
+          { apiKey: cloud.apiKey, model: cloud.model, baseURL: cloud.url },
+          { token: github.token },
+          { owner, repo, base: typeof body.base === 'string' && body.base.trim() ? body.base.trim() : undefined, instruction },
+        )
+        if (!result.ok) return send(res, 502, { success: false, error: result.error })
+        return send(res, 200, { success: true, summary: result.summary, pull_request: result.pullRequest })
       }
 
       send(res, 404, { success: false, error: `No route for ${req.method} ${path}` })

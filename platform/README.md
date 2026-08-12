@@ -155,6 +155,37 @@ The first person to ever sign in becomes the platform owner automatically
 (the same `handle_new_user` rule the Supabase-hosted deployment already
 uses) -- no separate admin-creation step.
 
+## Zero-local-agent coding path (`api/src/codingAgent.ts` + `githubCommit.ts`)
+
+For a deployment that wants to run entirely without any local Agent on any
+device: connect a GitHub token at the platform level (**Settings -> GitHub
+Connection**, validated against GitHub before it's stored, never echoed
+back) and a real Claude key (**Settings -> Cloud Smart Tier**, provider
+"Claude"). With both configured, the composer's **Cloud Coding Agent**
+toggle (the branch icon) routes a message to `POST /code/request` instead
+of chat: the server itself explores the real repository (`list_files` /
+`read_file`, via GitHub's Contents API) and, when it's ready, ships the
+change as one atomic commit and opens a real pull request -- all through
+`githubCommit.ts`'s Git Data API pipeline (blob -> tree -> commit -> ref
+update), with **no git binary, no local clone, no working directory on
+disk anywhere**. This is the direct answer to "I don't want any local
+Agent running on any device, make the server itself commit/push to
+GitHub."
+
+- **Still reviewable, never silent.** Opening the PR is the same human
+  checkpoint every other autonomous-coding path in this project uses
+  (`local-runtime`'s `github.open_pr`, the deployment-proposal pipeline) --
+  the agent never merges or pushes straight to `main` on its own.
+- **A follow-up message reuses the same branch/PR** instead of erroring on
+  a duplicate (`commitFilesAndOpenPr` checks for an existing branch ref and
+  an already-open PR from it before creating either).
+- **Bounded.** `runCodingAgent` caps itself at 12 tool-use iterations
+  (explore + commit) so a confused loop can't run away.
+- Real, HTTP-verified tests for both the commit/PR pipeline
+  (`test/githubCommit.test.ts`, against a fake server implementing the
+  actual Git Data API sequence) and the full explore-then-commit loop
+  (`test/codingAgent.test.ts`, fake Anthropic + fake GitHub together).
+
 Proposals get queued one of two ways:
 
 - **"Ship latest main" button** (Deployments page) -- fetches the real

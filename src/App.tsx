@@ -1646,6 +1646,106 @@ function GitHubIntegrationCard() {
   )
 }
 
+// Platform-level GitHub connection: one token, held server-side by
+// platform-api, used by the zero-local-agent coding path
+// (codingAgent.ts/githubCommit.ts) to read and commit real files directly
+// via the GitHub API -- no local device, no local-runtime, no pairing
+// required anywhere. Distinct from GitHubIntegrationCard above, which
+// connects local-runtime's own per-device tools -- this one is what
+// powers the "Cloud Coding Agent" composer toggle for anyone with no
+// local Agent installed at all.
+function PlatformGithubIntegrationCard() {
+  const [status, setStatus] = useState<platformApi.GithubConnectionStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [token, setToken] = useState('')
+  const [defaultRepo, setDefaultRepo] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  function load() {
+    setLoading(true)
+    platformApi.getGithubConnectionStatus().then(setStatus).finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  async function handleSave(event: FormEvent) {
+    event.preventDefault()
+    if (!token.trim()) return
+    setSaving(true)
+    setError('')
+    const result = await platformApi.connectPlatformGithub(token.trim(), defaultRepo.trim() || undefined)
+    setSaving(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    setToken('')
+    load()
+  }
+
+  async function handleDisconnect() {
+    setSaving(true)
+    await platformApi.disconnectPlatformGithub()
+    setSaving(false)
+    load()
+  }
+
+  if (!platformApi.isPlatformApiConfigured()) return null
+
+  return (
+    <div className="info-panel" style={{ marginTop: 20 }}>
+      <div className="info-panel-header">
+        <GitBranch size={18} />
+        <span>GitHub Connection (Cloud Coding Agent)</span>
+        {!loading && (
+          <span className={`status-badge ${status?.configured ? 'badge-success' : 'badge-unknown'}`} style={{ marginInlineStart: 'auto' }}>
+            {status?.configured ? `Connected · @${status.username}` : 'Not connected'}
+          </span>
+        )}
+      </div>
+      <div className="info-panel-body">
+        <p className="data-card-desc" style={{ marginBottom: 12 }}>
+          Held server-side by the platform, not any device -- lets Yahalla read repository files and ship real
+          branch/commit/pull-request changes directly via the GitHub API when the Cloud Coding Agent toggle
+          (composer, the branch icon) is on. No local install needed on any machine. Create a token with{' '}
+          <code>repo</code> scope at{' '}
+          <a href="https://github.com/settings/tokens" target="_blank" rel="noreferrer">github.com/settings/tokens</a>.
+        </p>
+        {error && <p className="data-card-desc" style={{ color: '#fca5a5', marginBottom: 8 }}>{error}</p>}
+        {status?.configured ? (
+          <button className="mini-button reject" disabled={saving} onClick={handleDisconnect}>
+            <X size={14} /> Disconnect
+          </button>
+        ) : (
+          <form onSubmit={handleSave}>
+            <input
+              className="text-input"
+              type="password"
+              placeholder="GitHub Personal Access Token (ghp_...)"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              style={{ width: '100%', marginBottom: 8 }}
+            />
+            <input
+              className="text-input"
+              placeholder="Default repo, optional (owner/name)"
+              value={defaultRepo}
+              onChange={(e) => setDefaultRepo(e.target.value)}
+              style={{ width: '100%', marginBottom: 8 }}
+            />
+            <button type="submit" className="primary-button" disabled={saving || !token.trim()}>
+              {saving ? 'Connecting…' : 'Connect'}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // Integrations Hub -- Databases card: unlocks agentLoop's db_query
 // (read-only, enforced by a real Postgres READ ONLY transaction -- rejected
 // at the database engine level, not just by app convention) and db_execute
@@ -1809,6 +1909,7 @@ function SettingsSection() {
         <p>Connect real services and tools with one click -- no terminal, ever</p>
       </div>
       <GitHubIntegrationCard />
+      <PlatformGithubIntegrationCard />
       <DatabaseIntegrationCard />
       <CloudTierSettingsCard />
     </div>
@@ -2219,6 +2320,13 @@ function ChatSection() {
   // with cloudBoostEnabled but checked first below: real tool access beats
   // a bigger model when both are on.
   const [deviceTaskEnabled, setDeviceTaskEnabled] = useState(false)
+  // Zero-local-agent coding path (platform/api/src/codingAgent.ts): the
+  // server itself reads real repo files and ships a real branch/commit/PR
+  // straight to GitHub, entirely over the GitHub API -- no local device,
+  // no local-runtime, no pairing required anywhere. Checked before
+  // deviceTaskEnabled below since it's the explicit "don't run anything
+  // local at all" choice.
+  const [codingAgentEnabled, setCodingAgentEnabled] = useState(false)
   const browserHistoryRef = useRef<BrowserChatMessage[]>([])
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -2854,7 +2962,22 @@ function ChatSection() {
         }
       }
 
-      if (deviceTaskEnabled && platformApi.isPlatformApiConfigured()) {
+      // The server itself explores real files and ships a real
+      // branch/commit/PR via the GitHub API (platform/api/src/codingAgent.ts)
+      // -- no device pairing, no local-runtime, nothing running on any
+      // user's own machine. Needs a platform GitHub connection (Settings)
+      // and a real Claude key (Settings -> Cloud Smart Tier).
+      async function callCodingAgent(): Promise<ChatResponse> {
+        const agentResult = await platformApi.requestCodeChange(message)
+        if (!agentResult.ok) return { success: false, error: agentResult.error }
+        const prNote = agentResult.pullRequest ? `\n\n[Pull request #${agentResult.pullRequest.number}](${agentResult.pullRequest.html_url})` : ''
+        return { success: true, answer: `${agentResult.summary}${prNote}`, conversation_id: conversationId ?? undefined }
+      }
+
+      if (codingAgentEnabled && platformApi.isPlatformApiConfigured()) {
+        setRuntimeTier('cloud')
+        result = await callCodingAgent()
+      } else if (deviceTaskEnabled && platformApi.isPlatformApiConfigured()) {
         setRuntimeTier('device')
         result = await callDeviceTask()
       } else if (cloudBoostEnabled && platformApi.isPlatformApiConfigured()) {
@@ -3520,6 +3643,20 @@ function ChatSection() {
                 }
               >
                 <Zap size={18} />
+              </button>
+            )}
+            {platformApi.isPlatformApiConfigured() && (
+              <button
+                type="button"
+                className={`composer-icon coding-agent ${codingAgentEnabled ? 'active' : ''}`}
+                onClick={() => setCodingAgentEnabled((v) => !v)}
+                title={
+                  codingAgentEnabled
+                    ? 'Cloud Coding Agent is ON -- this message ships a real commit + PR straight to GitHub, no local device involved'
+                    : 'Cloud Coding Agent (off) -- click to have the server itself commit and open a real PR for the next message (Settings -> GitHub Connection)'
+                }
+              >
+                <GitBranch size={18} />
               </button>
             )}
             <textarea
