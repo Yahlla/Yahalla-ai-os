@@ -1,7 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { resumeApproval, runChat, type RuntimeContext } from './agentLoop.js'
 import type { RuntimeConfig } from './config.js'
+import { saveConfig } from './config.js'
 import type { Db } from './db.js'
+import { pairDevice } from './devicePairing.js'
 import { EmbodimentStateMachine } from './embodiment/stateMachine.js'
 import { detectHardware } from './hardware.js'
 import { findLlamaServerBinary, isLlamaServerInstalled, isLlmReachable, LocalModelProcess } from './llm.js'
@@ -33,6 +35,10 @@ export type ServerDeps = {
   modelProcess: LocalModelProcess
   embodiment?: EmbodimentStateMachine
   perception?: PerceptionManager
+  // Called after a pairing/unpairing change so index.ts can stop the old
+  // task poller and start a new one against the updated config. Optional
+  // only so tests that don't care about remote task dispatch can omit it.
+  restartTaskPoller?: () => void
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -68,7 +74,7 @@ function applyCors(req: IncomingMessage, res: ServerResponse, config: RuntimeCon
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 }
 
-function ctxFrom(deps: ServerDeps, embodiment: EmbodimentStateMachine, perception: PerceptionManager): RuntimeContext {
+export function ctxFrom(deps: ServerDeps, embodiment: EmbodimentStateMachine, perception: PerceptionManager): RuntimeContext {
   const active = getActiveModel(deps.db)
   return {
     db: deps.db,
@@ -220,6 +226,47 @@ export function createHttpServer(deps: ServerDeps) {
       if (path === '/tasks' && req.method === 'GET') {
         const rows = deps.db.prepare('SELECT * FROM tasks ORDER BY created_at DESC LIMIT 50').all()
         return send(res, 200, { tasks: rows })
+      }
+
+      // Remote command dispatch (task #78-81): pairs this machine against a
+      // platform-api deployment so a task created from any browser/device
+      // can be routed here and run through this machine's own agentLoop
+      // (see taskPoller.ts). The pairing code itself comes from the web
+      // Control Center's "Pair a device" flow -- this endpoint only ever
+      // consumes a code, it never issues one.
+      if (path === '/device/pair' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const platformApiUrl = String(body.platform_api_url ?? '').trim()
+        const code = String(body.code ?? '').trim()
+        const deviceName = String(body.device_name ?? 'Yahalla Device').trim()
+        if (!platformApiUrl || !code) {
+          return send(res, 400, { success: false, error: 'platform_api_url and code are required.' })
+        }
+        try {
+          const result = await pairDevice(platformApiUrl, code, deviceName)
+          deps.config.platformApiUrl = platformApiUrl
+          deps.config.deviceToken = result.token
+          saveConfig(deps.config)
+          deps.restartTaskPoller?.()
+          return send(res, 200, { success: true, device_id: result.deviceId, device_name: result.deviceName })
+        } catch (error) {
+          return send(res, 502, { success: false, error: error instanceof Error ? error.message : 'Pairing failed.' })
+        }
+      }
+
+      if (path === '/device/unpair' && req.method === 'POST') {
+        delete deps.config.platformApiUrl
+        delete deps.config.deviceToken
+        saveConfig(deps.config)
+        deps.restartTaskPoller?.()
+        return send(res, 200, { success: true })
+      }
+
+      if (path === '/device/status' && req.method === 'GET') {
+        return send(res, 200, {
+          paired: Boolean(deps.config.platformApiUrl && deps.config.deviceToken),
+          platform_api_url: deps.config.platformApiUrl ?? null,
+        })
       }
 
       if (path === '/memory' && req.method === 'GET') {

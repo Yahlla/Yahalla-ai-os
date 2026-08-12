@@ -7,6 +7,13 @@ export type RuntimeConfig = {
   authToken: string
   projectRoot: string | null
   allowedOrigins: string[]
+  // Set once this machine is paired as a remote-command-capable device
+  // (see devicePairing.ts) -- lets a task created from any browser/device
+  // (chat, Cloud Boost, phone) reach this specific machine's real file/
+  // git/tool access via platform-api's task queue. Both unset (the
+  // default) means this device never polls for or executes remote tasks.
+  platformApiUrl?: string
+  deviceToken?: string
 }
 
 const DEFAULT_ALLOWED_ORIGINS = [
