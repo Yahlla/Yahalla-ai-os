@@ -86,6 +86,8 @@ export function ctxFrom(deps: ServerDeps, embodiment: EmbodimentStateMachine, pe
     modelKey: active?.key ?? 'local-model',
     embodiment,
     worldModel: perception.worldModel,
+    platformApiUrl: deps.config.platformApiUrl,
+    deviceToken: deps.config.deviceToken,
   }
 }
 

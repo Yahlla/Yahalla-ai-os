@@ -9,6 +9,7 @@ import { addMemory, getPreference, recordTaskFeedback } from './memory.js'
 import { checkAccess } from './permissions.js'
 import type { WorldModel } from './perception/worldModel.js'
 import { buildOpenAITools, DEFAULT_RUN_COMMAND_ALLOWLIST, getTool, type ToolDef } from './tools.js'
+import { searchMemory, storeMemory } from './vectorMemory.js'
 
 export type ChatMessage = { role: string; content: string | null; tool_calls?: any; tool_call_id?: string; name?: string }
 
@@ -31,14 +32,22 @@ export type RuntimeContext = {
   modelKey: string
   embodiment: EmbodimentStateMachine
   worldModel: WorldModel
+  // Set once this device is paired to a platform-api deployment (see
+  // devicePairing.ts) -- lets the agent loop pull relevant project memory
+  // into context automatically (vectorMemory.ts) instead of the user
+  // having to re-explain history every conversation. Both unset just means
+  // memory search/store silently no-ops.
+  platformApiUrl?: string
+  deviceToken?: string
 }
 
 // Evidence/verification and coding-agent-workflow rules carried over
 // verbatim in spirit from the platform's Supabase edge function system
 // prompt -- these are the behavioral rules that matter, independent of
 // where the agent loop actually executes.
-function buildSystemPrompt(projectRoot: string, ctx: RuntimeContext): string {
+async function buildSystemPrompt(projectRoot: string, ctx: RuntimeContext, currentMessage: string): Promise<string> {
   const perceptionContext = buildPerceptionContext(ctx)
+  const memoryContext = await buildMemoryContext(ctx, currentMessage)
   return `
 You are Yahalla AI, a real local coding agent running entirely on this device -- not a chatbot that talks about code. The project you work on is at: ${projectRoot}
 
@@ -54,9 +63,30 @@ Coding-agent workflow for any request that touches the project. You are autonomo
 Git and GitHub: git_status/git_diff/git_create_branch/git_commit/git_push/github.open_pr are all free to use without asking -- call them directly as part of the workflow above, never ask the user to run a command themselves, and never fabricate a commit hash, repo URL, PR number, or push result. github.write (creating a brand-new repository, not a PR) is the one GitHub action that still requires the user's approval -- the platform enforces this automatically, just call the tool and wait.
 
 Databases: call db_list_connections first if you don't already know a connection's id. db_query is read-only (enforced by the database itself, not just convention) and safe to use freely for inspecting data/schema, debugging, and diagnostics. db_execute runs writes/DDL and requires the user's approval -- call it directly, never ask the user to run SQL themselves, and never fabricate query results or row counts.
-${perceptionContext ? `\n${perceptionContext}\n` : ''}
+${perceptionContext ? `\n${perceptionContext}\n` : ''}${memoryContext ? `\n${memoryContext}\n` : ''}
 Be concise and useful. Respond in the user's language.
 `.trim()
+}
+
+// Folds relevant prior project memory into the prompt as weak supporting
+// context, the same trust level as the perception context above -- real
+// past entries this project actually recorded, ranked by a real cosine
+// similarity search (see vectorMemory.ts), but never presented as
+// something the user just said. Silently empty when this device isn't
+// paired to platform-api, or nothing relevant was ever recorded.
+async function buildMemoryContext(ctx: RuntimeContext, currentMessage: string): Promise<string> {
+  const results = await searchMemory({ platformApiUrl: ctx.platformApiUrl, deviceToken: ctx.deviceToken }, currentMessage, 5)
+  const relevant = results.filter((r) => r.similarity > 0.3)
+  if (relevant.length === 0) return ''
+
+  const lines = relevant.map((r) => `- (${new Date(r.created_at).toLocaleDateString()}, ${r.source}) ${r.content}`)
+  return `Relevant memory from this project's history (retrieved by similarity to the current message, not guaranteed relevant -- use only what's actually applicable):\n${lines.join('\n')}`
+}
+
+function summarizeForMemory(message: string, result: ChatResult): string {
+  const tools = (result.executedTools ?? []).map((t) => t.tool).join(', ')
+  const answer = (result.answer ?? '').slice(0, 400)
+  return `Task: ${message.slice(0, 300)}\nTools used: ${tools || 'none'}\nOutcome: ${answer}`
 }
 
 // Folds the World Model into the prompt as weak, explicitly-probabilistic
@@ -395,9 +425,18 @@ export async function runChat(
   }
 
   const history = loadHistory(ctx.db, convId)
-  const messages: ChatMessage[] = [{ role: 'system', content: buildSystemPrompt(ctx.projectRoot, ctx) + planContext }, ...history]
+  const systemPrompt = await buildSystemPrompt(ctx.projectRoot, ctx, message)
+  const messages: ChatMessage[] = [{ role: 'system', content: systemPrompt + planContext }, ...history]
 
   const chatResult = await runLoop(ctx, taskId, convId, { messages, executedTools: [] })
+
+  // Only worth remembering across conversations when real project work
+  // happened (a tool actually ran) -- not every trivial Q&A, which would
+  // just flood future context with noise. Best-effort: a failed memory
+  // write never fails the chat it came from.
+  if (chatResult.status === 'completed' && (chatResult.executedTools?.length ?? 0) > 0) {
+    void storeMemory({ platformApiUrl: ctx.platformApiUrl, deviceToken: ctx.deviceToken }, summarizeForMemory(message, chatResult), 'agent')
+  }
 
   // Honest bookkeeping, not fine-grained per-subtask tracking the loop
   // doesn't actually do: once the parent task the plan belongs to

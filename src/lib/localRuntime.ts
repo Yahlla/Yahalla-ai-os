@@ -196,6 +196,27 @@ export async function unpairThisRuntime(): Promise<void> {
   await runtimeFetch('/device/unpair', { method: 'POST' }).catch(() => {})
 }
 
+// Real, per-device model status -- what actually powers chat on this
+// machine, not a static catalog row that was seeded once and never
+// touched again. See ModelsSection in App.tsx.
+export type LocalModelSummary = {
+  key: string
+  name: string
+  status: 'not_downloaded' | 'downloading' | 'ready' | 'error'
+  active: boolean
+}
+
+export async function listLocalModels(): Promise<LocalModelSummary[] | null> {
+  try {
+    const response = await runtimeFetch('/models')
+    if (!response.ok) return null
+    const data = (await response.json()) as { installed?: { key: string; name: string; status: string; active: number }[] }
+    return (data.installed ?? []).map((m) => ({ key: m.key, name: m.name, status: m.status as LocalModelSummary['status'], active: m.active === 1 }))
+  } catch {
+    return null
+  }
+}
+
 // Integrations Hub (GitHub): a Personal Access Token entered here, once,
 // is what unlocks the github.read/github.write tools already wired into
 // agentLoop (see local-runtime/src/github.ts) -- letting Yahalla actually

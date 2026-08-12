@@ -365,18 +365,31 @@ function ToolsSection() {
   )
 }
 
+// Real per-device/per-deployment model status. The old version of this
+// page read a Supabase 'models' table whose 'status' column was seeded as
+// the literal string 'unknown' at initial setup (see
+// supabase/migrations/20260810114233_20260810_yahalla_seed_data.sql) and
+// nothing has ever updated it since -- it's a disconnected relic from
+// before this session's local-first pivot. Real status now comes straight
+// from the actual sources of inference: this browser tab's own paired
+// local-runtime (if reachable) and the Cloud Smart Tier config on Strato.
 function ModelsSection() {
-  const [models, setModels] = useState<Model[]>([])
+  const [localModels, setLocalModels] = useState<localRuntime.LocalModelSummary[] | null>(null)
+  const [localRuntimeReachable, setLocalRuntimeReachable] = useState<boolean | null>(null)
+  const [cloudStatus, setCloudStatus] = useState<platformApi.CloudTierStatus | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    api.getModels().then(setModels).finally(() => setLoading(false))
+    Promise.all([
+      localRuntime.listLocalModels(),
+      platformApi.isPlatformApiConfigured() ? platformApi.getCloudTierStatus() : Promise.resolve(null),
+    ]).then(([local, cloud]) => {
+      setLocalModels(local)
+      setLocalRuntimeReachable(local !== null)
+      setCloudStatus(cloud)
+      setLoading(false)
+    })
   }, [])
-
-  async function toggleEnabled(model: Model) {
-    await api.updateModel(model.id, { enabled: !model.enabled })
-    setModels((prev) => prev.map((m) => (m.id === model.id ? { ...m, enabled: !m.enabled } : m)))
-  }
 
   if (loading) return <div className="loading-text">Loading models…</div>
 
@@ -384,38 +397,65 @@ function ModelsSection() {
     <div className="admin-section">
       <div className="section-header">
         <h2>Models</h2>
-        <p>{models.length} models registered</p>
+        <p>Real status from the actual inference sources -- not a static catalog</p>
       </div>
       <div className="card-grid">
-        {models.map((model) => (
-          <div key={model.id} className="data-card">
+        {localRuntimeReachable === false && (
+          <div className="data-card">
             <div className="data-card-header">
-              <div className="data-card-icon">
-                <Cpu size={18} />
+              <div className="data-card-icon"><Cpu size={18} /></div>
+              <div className="data-card-title">
+                <div className="data-card-name">Local Runtime (this computer)</div>
+                <div className="data-card-sub">Not reachable from this browser tab</div>
               </div>
+              <StatusBadge status="offline" />
+            </div>
+            <p className="data-card-desc">Open this page from the device running local-runtime to see its real model status.</p>
+          </div>
+        )}
+        {localModels?.length === 0 && (
+          <div className="data-card">
+            <div className="data-card-header">
+              <div className="data-card-icon"><Cpu size={18} /></div>
+              <div className="data-card-title">
+                <div className="data-card-name">Local Runtime (this computer)</div>
+                <div className="data-card-sub">Reachable, no models downloaded yet</div>
+              </div>
+              <StatusBadge status="offline" />
+            </div>
+          </div>
+        )}
+        {localModels?.map((model) => (
+          <div key={model.key} className="data-card">
+            <div className="data-card-header">
+              <div className="data-card-icon"><Cpu size={18} /></div>
               <div className="data-card-title">
                 <div className="data-card-name">{model.name}</div>
-                <div className="data-card-sub">{model.key} · {model.type}</div>
+                <div className="data-card-sub">{model.key} · this computer</div>
               </div>
-              <StatusBadge status={model.status} />
+              <StatusBadge status={model.active ? 'online' : model.status === 'ready' ? 'pending' : model.status} />
             </div>
             <div className="model-features">
-              {model.tool_calling_support && <span className="feature-chip">Tools</span>}
-              {model.reasoning_support && <span className="feature-chip">Reasoning</span>}
-              {model.coding_capability && <span className="feature-chip">Coding</span>}
-              {model.vision_support && <span className="feature-chip">Vision</span>}
-              {model.embedding_capability && <span className="feature-chip">Embedding</span>}
-            </div>
-            <div className="data-card-sub" style={{ marginTop: '8px' }}>
-              {model.is_local ? 'Local' : 'Remote'} · Priority {model.priority} · {model.context_length} ctx
-            </div>
-            <div className="data-card-actions">
-              <button className="mini-button" onClick={() => toggleEnabled(model)}>
-                {model.enabled ? 'Disable' : 'Enable'}
-              </button>
+              {model.active && <span className="feature-chip">Active</span>}
+              {model.status === 'ready' && <span className="feature-chip">Downloaded</span>}
             </div>
           </div>
         ))}
+        {platformApi.isPlatformApiConfigured() && (
+          <div className="data-card">
+            <div className="data-card-header">
+              <div className="data-card-icon"><Sparkles size={18} /></div>
+              <div className="data-card-title">
+                <div className="data-card-name">Cloud Smart Tier</div>
+                <div className="data-card-sub">{cloudStatus?.model ?? 'Opt-in, server-side'}</div>
+              </div>
+              <StatusBadge status={cloudStatus?.configured ? 'online' : 'offline'} />
+            </div>
+            <p className="data-card-desc">
+              {cloudStatus?.configured ? 'Configured and available to every user.' : 'Not configured -- add a key in Settings -> Integrations.'}
+            </p>
+          </div>
+        )}
       </div>
     </div>
   )
