@@ -1,6 +1,14 @@
 // Talks to the GitHub API directly from the user's own device -- there is
-// no server in the middle. The token is read from local preferences
-// (set once via the Control Center), never sent anywhere but api.github.com.
+// no server in the middle. The token is read from local preferences (set
+// once via the Control Center's Integrations card, see server.ts's
+// /integrations/github routes), never sent anywhere but api.github.com.
+
+// Overridable so tests can point this at a fake server instead of real
+// GitHub -- kept in sync with server.ts's own githubApiBase() helper,
+// which validates a token against this same base URL before storing it.
+export function githubApiBase(): string {
+  return process.env.GITHUB_API_BASE_URL ?? 'https://api.github.com'
+}
 
 export async function githubRead(token: string | undefined, args: Record<string, unknown>) {
   if (!token) {
@@ -12,7 +20,7 @@ export async function githubRead(token: string | undefined, args: Record<string,
   }
 
   const query = typeof args.query === 'string' ? args.query.toLowerCase() : ''
-  const response = await fetch('https://api.github.com/user/repos?per_page=50&sort=updated', {
+  const response = await fetch(`${githubApiBase()}/user/repos?per_page=50&sort=updated`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'yahalla-ai-os-local-runtime' },
   })
   const text = await response.text()
@@ -51,7 +59,7 @@ export async function githubWrite(token: string | undefined, args: Record<string
     return { success: false, operation: 'github.write', message: 'name is required.' }
   }
 
-  const response = await fetch('https://api.github.com/user/repos', {
+  const response = await fetch(`${githubApiBase()}/user/repos`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,

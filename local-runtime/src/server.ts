@@ -5,12 +5,14 @@ import { saveConfig } from './config.js'
 import type { Db } from './db.js'
 import { pairDevice } from './devicePairing.js'
 import { EmbodimentStateMachine } from './embodiment/stateMachine.js'
+import { githubApiBase } from './github.js'
 import { detectHardware } from './hardware.js'
 import { findLlamaServerBinary, isLlamaServerInstalled, isLlmReachable, LocalModelProcess } from './llm.js'
 import { PermissionRequiredError, PerceptionManager } from './perception/manager.js'
 import {
   addKnowledge,
   addMemory,
+  getPreference,
   listKnowledge,
   listMemory,
   listPreferences,
@@ -296,6 +298,49 @@ export function createHttpServer(deps: ServerDeps) {
         const body = await readJsonBody(req)
         setPreference(deps.db, String(body.key ?? ''), body.value)
         return send(res, 200, { success: true })
+      }
+
+      // GitHub integration (task #82: Integrations Hub): agentLoop's
+      // github.read/github.write tools already read the 'github_token'
+      // preference (see agentLoop.ts), but there was never a UI path to
+      // set it -- setting it required either the generic /preferences
+      // endpoint (which round-trips the raw secret back on every GET) or
+      // hand-editing the local SQLite file. This validates the token
+      // against GitHub itself before storing it (so a typo/expired token
+      // never gets silently saved as "connected"), and never returns the
+      // raw token back to the caller -- only whether it's configured and,
+      // if so, the connected username, mirroring how the Cloud Tier
+      // status endpoint on platform-api never echoes back its own key.
+      if (path === '/integrations/github' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const token = String(body.token ?? '').trim()
+        if (!token) return send(res, 400, { success: false, error: 'A GitHub Personal Access Token is required.' })
+        try {
+          const response = await fetch(`${githubApiBase()}/user`, {
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'yahalla-ai-os-local-runtime' },
+          })
+          if (!response.ok) {
+            return send(res, 400, { success: false, error: response.status === 401 ? 'GitHub rejected this token -- check it was copied correctly and has not expired.' : `GitHub API returned HTTP ${response.status}.` })
+          }
+          const user = (await response.json()) as { login?: string }
+          setPreference(deps.db, 'github_token', token)
+          setPreference(deps.db, 'github_username', user.login ?? null)
+          return send(res, 200, { success: true, username: user.login ?? null })
+        } catch (error) {
+          return send(res, 502, { success: false, error: error instanceof Error ? error.message : 'Could not reach GitHub to validate the token.' })
+        }
+      }
+
+      if (path === '/integrations/github' && req.method === 'DELETE') {
+        setPreference(deps.db, 'github_token', null)
+        setPreference(deps.db, 'github_username', null)
+        return send(res, 200, { success: true })
+      }
+
+      if (path === '/integrations/github/status' && req.method === 'GET') {
+        const token = getPreference<string | null>(deps.db, 'github_token')
+        const username = getPreference<string | null>(deps.db, 'github_username')
+        return send(res, 200, { configured: Boolean(token), username: token ? username ?? null : null })
       }
 
       if (path === '/permissions' && req.method === 'GET') {

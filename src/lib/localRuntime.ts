@@ -195,6 +195,40 @@ export async function unpairThisRuntime(): Promise<void> {
   await runtimeFetch('/device/unpair', { method: 'POST' }).catch(() => {})
 }
 
+// Integrations Hub (GitHub): a Personal Access Token entered here, once,
+// is what unlocks the github.read/github.write tools already wired into
+// agentLoop (see local-runtime/src/github.ts) -- letting Yahalla actually
+// read/create GitHub repositories on your command instead of just having
+// the capability sit unreachable behind no UI. Device-local by design:
+// the token is validated and stored on the machine that runs the tools,
+// never sent to or through Strato.
+export type GithubIntegrationStatus = { configured: boolean; username: string | null }
+
+export async function getGithubIntegrationStatus(): Promise<GithubIntegrationStatus | null> {
+  try {
+    const response = await runtimeFetch('/integrations/github/status')
+    if (!response.ok) return null
+    return (await response.json()) as GithubIntegrationStatus
+  } catch {
+    return null
+  }
+}
+
+export async function connectGithub(token: string): Promise<{ ok: true; username: string | null } | { ok: false; error: string }> {
+  try {
+    const response = await runtimeFetch('/integrations/github', { method: 'POST', body: JSON.stringify({ token }) })
+    const result = (await response.json()) as { success?: boolean; username?: string | null; error?: string }
+    if (!response.ok || !result.success) return { ok: false, error: result.error ?? `Connecting to GitHub failed (HTTP ${response.status}).` }
+    return { ok: true, username: result.username ?? null }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'Local Agent Runtime is not reachable from this window.' }
+  }
+}
+
+export async function disconnectGithub(): Promise<void> {
+  await runtimeFetch('/integrations/github', { method: 'DELETE' }).catch(() => {})
+}
+
 export async function decideApproval(approvalId: string, decision: 'approve' | 'reject'): Promise<ChatResponse> {
   const response = await runtimeFetch(`/approvals/${approvalId}/decide`, {
     method: 'POST',

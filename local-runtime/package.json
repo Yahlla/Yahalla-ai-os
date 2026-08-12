@@ -14,7 +14,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/test/integration.test.js dist/test/repair-loop.test.js dist/test/perception.test.js dist/test/llm.test.js dist/test/planning.test.js dist/test/deviceDispatch.test.js"
+    "test": "node --test dist/test/integration.test.js dist/test/repair-loop.test.js dist/test/perception.test.js dist/test/llm.test.js dist/test/planning.test.js dist/test/deviceDispatch.test.js dist/test/githubIntegration.test.js"
   },
   "dependencies": {
     "@yahalla/agent-tools": "file:../packages/agent-tools"

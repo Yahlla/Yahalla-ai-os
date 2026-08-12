@@ -1366,6 +1366,95 @@ function CloudTierSettingsCard() {
   )
 }
 
+// Integrations Hub -- GitHub card: the github.read/github.write tools have
+// existed in agentLoop since task #19, reading a 'github_token' local
+// preference, but nothing in the UI ever let you set it. This is that
+// missing connection: one token field, one Save, and a live status badge
+// showing the connected GitHub username -- the same zero-terminal,
+// field+button+status pattern as CloudTierSettingsCard, just scoped to
+// this device (git/GitHub tools execute wherever local-runtime runs, see
+// RemoteAccessCard) rather than the whole Strato deployment.
+function GitHubIntegrationCard() {
+  const [status, setStatus] = useState<localRuntime.GithubIntegrationStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [token, setToken] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  function load() {
+    setLoading(true)
+    localRuntime.getGithubIntegrationStatus().then(setStatus).finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  async function handleSave(event: FormEvent) {
+    event.preventDefault()
+    if (!token.trim()) return
+    setSaving(true)
+    setError('')
+    const result = await localRuntime.connectGithub(token.trim())
+    setSaving(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    setToken('')
+    load()
+  }
+
+  async function handleDisconnect() {
+    setSaving(true)
+    await localRuntime.disconnectGithub()
+    setSaving(false)
+    load()
+  }
+
+  return (
+    <div className="info-panel" style={{ marginTop: 20 }}>
+      <div className="info-panel-header">
+        <GitBranch size={18} />
+        <span>GitHub (this computer)</span>
+        {!loading && (
+          <span className={`status-badge ${status?.configured ? 'badge-success' : 'badge-unknown'}`} style={{ marginInlineStart: 'auto' }}>
+            {status?.configured ? `Connected · @${status.username}` : status === null ? 'Runtime not reachable here' : 'Not connected'}
+          </span>
+        )}
+      </div>
+      <div className="info-panel-body">
+        <p className="data-card-desc" style={{ marginBottom: 12 }}>
+          Lets Yahalla read your repositories and create new ones on your command (the github.read/github.write
+          tools). Runs from a Personal Access Token, validated against GitHub and stored only on this machine --
+          create one with <code>repo</code> scope at{' '}
+          <a href="https://github.com/settings/tokens" target="_blank" rel="noreferrer">github.com/settings/tokens</a>.
+        </p>
+        {error && <p className="data-card-desc" style={{ color: '#fca5a5', marginBottom: 8 }}>{error}</p>}
+        {status?.configured ? (
+          <button className="mini-button reject" disabled={saving} onClick={handleDisconnect}>
+            <X size={14} /> Disconnect
+          </button>
+        ) : (
+          <form onSubmit={handleSave}>
+            <input
+              className="text-input"
+              type="password"
+              placeholder="GitHub Personal Access Token (ghp_...)"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              style={{ width: '100%', marginBottom: 8 }}
+            />
+            <button type="submit" className="primary-button" disabled={saving || !token.trim()}>
+              {saving ? 'Connecting…' : 'Connect'}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function SettingsSection() {
   return (
     <div className="admin-section">
@@ -1401,6 +1490,11 @@ function SettingsSection() {
           </div>
         </div>
       </div>
+      <div className="section-header" style={{ marginTop: 32 }}>
+        <h2>Integrations</h2>
+        <p>Connect real services and tools with one click -- no terminal, ever</p>
+      </div>
+      <GitHubIntegrationCard />
       <CloudTierSettingsCard />
     </div>
   )
