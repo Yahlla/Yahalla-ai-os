@@ -3,6 +3,7 @@ import { runCodingAgent } from './codingAgent.js'
 import { callCloudTier, resolveCloudTierConfig, type CloudTierConfig } from './cloudTier.js'
 import { getPool, withServiceRole, withUserSession } from './db.js'
 import { proposeLatestDeployment, verifyGithubWebhookSignature } from './deployments.js'
+import { buildGithubAuthorizeUrl, exchangeGithubOAuthCode, signOAuthState, verifyOAuthState } from './githubOAuth.js'
 import { verifyJwt } from './jwt.js'
 import { toVectorLiteral, validateEmbedding } from './memory.js'
 import { authenticateDevice, createPairingCode, ensureHumanUser, exchangePairingCode, recordHeartbeat } from './pairing.js'
@@ -33,6 +34,22 @@ export type PlatformConfig = {
   // Required to accept POST /webhooks/github -- without it the endpoint
   // stays disabled (404) rather than accepting unverifiable requests.
   githubWebhookSecret?: string
+  // "Sign in with GitHub" for the platform-level GitHub connection (see
+  // githubOAuth.ts) -- a real GitHub OAuth App's Client ID/Secret,
+  // registered by the deployment owner at
+  // github.com/settings/developers with its Authorization callback URL
+  // set to https://<this deployment>/auth/github/callback. Without both
+  // set, /auth/github/start stays disabled (503) and the Settings page
+  // falls back to the manual Personal Access Token field -- never a
+  // half-configured OAuth flow.
+  githubOAuthClientId?: string
+  githubOAuthClientSecret?: string
+  // Where to redirect the browser back to once the GitHub OAuth callback
+  // finishes (success or failure) -- the frontend's own origin, since
+  // platform-api never serves the frontend itself. Falls back to the
+  // first entry of allowedOrigins when unset; if neither is available the
+  // callback responds with a plain HTML page instead of a redirect.
+  frontendUrl?: string
 }
 
 type Identity = { userId: string; kind: 'human' | 'device' }
@@ -57,6 +74,39 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload) })
   res.end(payload)
+}
+
+function sendRedirect(res: ServerResponse, location: string): void {
+  res.writeHead(302, { Location: location })
+  res.end()
+}
+
+function sendHtml(res: ServerResponse, status: number, html: string): void {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(html) })
+  res.end(html)
+}
+
+// Real GitHub token validation shared by both the manual-PAT connect route
+// and the OAuth callback below -- a bad/expired token never gets stored
+// silently as "connected" either way.
+async function validateGithubTokenAndFetchUsername(token: string): Promise<{ ok: true; username: string | null } | { ok: false; status: number; error: string }> {
+  const githubApiBase = process.env.GITHUB_API_BASE_URL ?? 'https://api.github.com'
+  try {
+    const response = await fetch(`${githubApiBase}/user`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'yahalla-ai-os-platform-api' },
+    })
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: 400,
+        error: response.status === 401 ? 'GitHub rejected this token -- check it was copied correctly and has not expired.' : `GitHub API returned HTTP ${response.status}.`,
+      }
+    }
+    const user = (await response.json()) as { login?: string }
+    return { ok: true, username: user.login ?? null }
+  } catch (error) {
+    return { ok: false, status: 502, error: error instanceof Error ? error.message : 'Could not reach GitHub to validate the token.' }
+  }
 }
 
 function applyCors(req: IncomingMessage, res: ServerResponse, config: PlatformConfig): void {
@@ -165,6 +215,60 @@ export function createPlatformServer(config: PlatformConfig) {
           return send(res, 502, { success: false, error: `Could not reach GitHub to check the latest commit on ${result.repo}.` })
         }
         return send(res, 200, { success: true, ...result })
+      }
+
+      // GitHub redirects the browser here directly after the user
+      // authorizes (or denies) the app on github.com -- a plain top-level
+      // navigation carries no Authorization header, so this can't go
+      // through resolveIdentity like every other route below. The signed
+      // `state` (githubOAuth.ts) is what proves which human started the
+      // flow, the same role a server-side session would normally play.
+      if (path === '/auth/github/callback' && req.method === 'GET') {
+        const frontend = config.frontendUrl ?? config.allowedOrigins[0]
+        const finish = (outcome: 'success' | 'error', message?: string) => {
+          if (frontend) {
+            const redirectUrl = new URL(frontend)
+            redirectUrl.searchParams.set('github_oauth', outcome)
+            if (message) redirectUrl.searchParams.set('message', message)
+            return sendRedirect(res, redirectUrl.toString())
+          }
+          return sendHtml(
+            res,
+            outcome === 'success' ? 200 : 400,
+            `<!doctype html><title>GitHub ${outcome === 'success' ? 'connected' : 'connection failed'}</title><body style="font-family:sans-serif;padding:40px">${outcome === 'success' ? 'GitHub connected. You can close this tab and return to Yahalla AI.' : `Could not connect GitHub: ${message ?? 'unknown error'}`}</body>`,
+          )
+        }
+
+        if (!config.githubOAuthClientId || !config.githubOAuthClientSecret) {
+          return send(res, 404, { success: false, error: 'GitHub OAuth is not configured on this deployment.' })
+        }
+        if (url.searchParams.get('error')) {
+          return finish('error', url.searchParams.get('error_description') ?? url.searchParams.get('error') ?? 'GitHub denied the request.')
+        }
+        const code = url.searchParams.get('code')
+        const state = url.searchParams.get('state')
+        if (!code || !state) return finish('error', 'Missing code or state from GitHub.')
+
+        const userId = verifyOAuthState(config.githubOAuthClientSecret, state)
+        if (!userId) return finish('error', 'This authorization link expired or is invalid -- try connecting again.')
+
+        const exchange = await exchangeGithubOAuthCode(
+          config.githubOAuthClientId,
+          config.githubOAuthClientSecret,
+          code,
+          `${req.headers['x-forwarded-proto'] ?? 'https'}://${req.headers.host}/auth/github/callback`,
+        )
+        if (!exchange.ok) return finish('error', exchange.error)
+
+        const validated = await validateGithubTokenAndFetchUsername(exchange.accessToken)
+        if (!validated.ok) return finish('error', validated.error)
+
+        try {
+          await saveGithubSettings(userId, { token: exchange.accessToken, username: validated.username ?? '' })
+        } catch {
+          return finish('error', 'Could not save the GitHub connection -- only an admin can connect GitHub.')
+        }
+        return finish('success')
       }
 
       const identity = await resolveIdentity(req, config)
@@ -605,34 +709,19 @@ export function createPlatformServer(config: PlatformConfig) {
       // person's SQLite file.
       if (path === '/settings/github' && req.method === 'GET') {
         const status = await getGithubStatus(identity.userId)
-        return send(res, 200, status)
+        return send(res, 200, { ...status, oauthAvailable: Boolean(config.githubOAuthClientId && config.githubOAuthClientSecret) })
       }
 
       if (path === '/settings/github' && req.method === 'POST') {
         const body = await readJsonBody(req)
         const token = typeof body.token === 'string' ? body.token.trim() : ''
         if (!token) return send(res, 400, { success: false, error: 'A GitHub Personal Access Token is required.' })
-        const githubApiBase = process.env.GITHUB_API_BASE_URL ?? 'https://api.github.com'
-        let username: string | null = null
-        try {
-          const response = await fetch(`${githubApiBase}/user`, {
-            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'yahalla-ai-os-platform-api' },
-          })
-          if (!response.ok) {
-            return send(res, 400, {
-              success: false,
-              error: response.status === 401 ? 'GitHub rejected this token -- check it was copied correctly and has not expired.' : `GitHub API returned HTTP ${response.status}.`,
-            })
-          }
-          const user = (await response.json()) as { login?: string }
-          username = user.login ?? null
-        } catch (error) {
-          return send(res, 502, { success: false, error: error instanceof Error ? error.message : 'Could not reach GitHub to validate the token.' })
-        }
+        const validated = await validateGithubTokenAndFetchUsername(token)
+        if (!validated.ok) return send(res, validated.status, { success: false, error: validated.error })
         try {
           await saveGithubSettings(identity.userId, {
             token,
-            username: username ?? '',
+            username: validated.username ?? '',
             defaultRepo: typeof body.default_repo === 'string' && body.default_repo.trim() ? body.default_repo.trim() : undefined,
           })
         } catch (error) {
@@ -640,7 +729,7 @@ export function createPlatformServer(config: PlatformConfig) {
           if (code === '42501') return send(res, 403, { success: false, error: 'Only an admin can change platform settings.' })
           throw error
         }
-        return send(res, 200, { success: true, username })
+        return send(res, 200, { success: true, username: validated.username })
       }
 
       if (path === '/settings/github' && req.method === 'DELETE') {
@@ -652,6 +741,23 @@ export function createPlatformServer(config: PlatformConfig) {
           throw error
         }
         return send(res, 200, { success: true })
+      }
+
+      // Step one of "Sign in with GitHub": mints the real github.com
+      // authorize URL for this specific human (via the signed state --
+      // see githubOAuth.ts) and hands it back as JSON rather than
+      // redirecting server-side, since this call carries the caller's own
+      // Authorization header (a plain top-level browser navigation to this
+      // URL would not) -- the frontend does `window.location.href = url`
+      // itself once it has the response.
+      if (path === '/auth/github/start' && req.method === 'POST') {
+        if (identity.kind !== 'human') return send(res, 403, { success: false, error: 'Only a human can connect GitHub.' })
+        if (!config.githubOAuthClientId || !config.githubOAuthClientSecret) {
+          return send(res, 503, { success: false, error: 'GitHub OAuth is not configured on this deployment -- use the Personal Access Token field instead.' })
+        }
+        const redirectUri = `${req.headers['x-forwarded-proto'] ?? 'https'}://${req.headers.host}/auth/github/callback`
+        const state = signOAuthState(config.githubOAuthClientSecret, identity.userId)
+        return send(res, 200, { success: true, url: buildGithubAuthorizeUrl(config.githubOAuthClientId, redirectUri, state) })
       }
 
       // The zero-local-agent coding path: a human describes a change, this

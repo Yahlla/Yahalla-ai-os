@@ -1661,6 +1661,8 @@ function PlatformGithubIntegrationCard() {
   const [defaultRepo, setDefaultRepo] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [oauthStarting, setOauthStarting] = useState(false)
+  const [showManualForm, setShowManualForm] = useState(false)
 
   function load() {
     setLoading(true)
@@ -1693,6 +1695,21 @@ function PlatformGithubIntegrationCard() {
     load()
   }
 
+  async function handleOAuthConnect() {
+    setOauthStarting(true)
+    setError('')
+    const result = await platformApi.startGithubOAuth()
+    setOauthStarting(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    // Real top-level navigation to github.com, not a fetch -- the browser
+    // comes back to /auth/github/callback -> redirected here with
+    // ?github_oauth=success|error, picked up by the dashboard-level effect.
+    window.location.href = result.url
+  }
+
   if (!platformApi.isPlatformApiConfigured()) return null
 
   return (
@@ -1719,8 +1736,24 @@ function PlatformGithubIntegrationCard() {
           <button className="mini-button reject" disabled={saving} onClick={handleDisconnect}>
             <X size={14} /> Disconnect
           </button>
+        ) : status?.oauthAvailable && !showManualForm ? (
+          <>
+            <button type="button" className="primary-button" disabled={oauthStarting} onClick={handleOAuthConnect} style={{ marginBottom: 8 }}>
+              <GitBranch size={14} /> {oauthStarting ? 'Redirecting to GitHub…' : 'Connect with GitHub'}
+            </button>
+            <div>
+              <button type="button" className="mini-button" onClick={() => setShowManualForm(true)}>
+                Use a Personal Access Token instead
+              </button>
+            </div>
+          </>
         ) : (
           <form onSubmit={handleSave}>
+            {status?.oauthAvailable && (
+              <button type="button" className="mini-button" onClick={() => setShowManualForm(false)} style={{ marginBottom: 8 }}>
+                ← Back to Connect with GitHub
+              </button>
+            )}
             <input
               className="text-input"
               type="password"
@@ -3763,6 +3796,25 @@ function ControlCenter({
 }) {
   const [active, setActive] = useState<Page>('Chat')
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [githubOAuthNotice, setGithubOAuthNotice] = useState<{ kind: 'success' | 'error'; message?: string } | null>(null)
+
+  // Picks up the ?github_oauth=success|error redirect back from
+  // platform-api's /auth/github/callback (see githubOAuth.ts) -- there's
+  // no router here, so this reads window.location.search directly on
+  // mount, switches to Settings so the result is visible, then strips the
+  // query params so a reload doesn't re-show the same notice.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const outcome = params.get('github_oauth')
+    if (outcome === 'success' || outcome === 'error') {
+      setGithubOAuthNotice({ kind: outcome, message: params.get('message') ?? undefined })
+      setActive('Settings')
+      params.delete('github_oauth')
+      params.delete('message')
+      const search = params.toString()
+      window.history.replaceState({}, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`)
+    }
+  }, [])
 
   const isAdminUser = profile.role === 'owner' || profile.role === 'admin'
 
@@ -3901,6 +3953,25 @@ function ControlCenter({
             <button className="icon-button"><CircleHelp size={18} /></button>
           </div>
         </header>
+
+        {githubOAuthNotice && (
+          <div
+            className="info-panel"
+            style={{ margin: '16px 24px 0', borderColor: githubOAuthNotice.kind === 'success' ? '#86efac' : '#fca5a5' }}
+          >
+            <div className="info-panel-body" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <GitBranch size={16} color={githubOAuthNotice.kind === 'success' ? '#86efac' : '#fca5a5'} />
+              <span style={{ color: githubOAuthNotice.kind === 'success' ? '#86efac' : '#fca5a5' }}>
+                {githubOAuthNotice.kind === 'success'
+                  ? 'GitHub connected successfully.'
+                  : `Could not connect GitHub: ${githubOAuthNotice.message ?? 'unknown error'}`}
+              </span>
+              <button className="icon-button" style={{ marginInlineStart: 'auto' }} onClick={() => setGithubOAuthNotice(null)}>
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+        )}
 
         {active === 'Chat' ? (
           renderPage()

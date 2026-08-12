@@ -182,12 +182,27 @@ export async function getTask(taskId: string): Promise<PlatformTask | null> {
 // directly via the GitHub API -- no device pairing, no local-runtime,
 // no local git clone, anywhere in the path.
 
-export type GithubConnectionStatus = { configured: boolean; username: string | null; defaultRepo: string | null }
+export type GithubConnectionStatus = { configured: boolean; username: string | null; defaultRepo: string | null; oauthAvailable: boolean }
 
 export async function getGithubConnectionStatus(): Promise<GithubConnectionStatus> {
   const res = await platformFetch('/settings/github')
-  if (!res?.ok) return { configured: false, username: null, defaultRepo: null }
+  if (!res?.ok) return { configured: false, username: null, defaultRepo: null, oauthAvailable: false }
   return (await res.json()) as GithubConnectionStatus
+}
+
+// "Sign in with GitHub": mints a real github.com authorize URL for the
+// signed-in human and hands it back so the caller can do
+// window.location.href = url itself (a real top-level navigation, not a
+// fetch redirect) -- see platform/api/src/githubOAuth.ts. Only available
+// when the deployment owner has registered a GitHub OAuth App
+// (oauthAvailable above); otherwise the manual Personal Access Token form
+// stays the only way to connect.
+export async function startGithubOAuth(): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+  const res = await platformFetch('/auth/github/start', { method: 'POST' })
+  if (!res) return { ok: false, error: 'Platform server is not configured.' }
+  const data = (await res.json()) as { success?: boolean; url?: string; error?: string }
+  if (!res.ok || !data.success || !data.url) return { ok: false, error: data.error ?? `Could not start GitHub sign-in (HTTP ${res.status}).` }
+  return { ok: true, url: data.url }
 }
 
 export async function connectPlatformGithub(token: string, defaultRepo?: string): Promise<{ ok: true; username: string | null } | { ok: false; error: string }> {

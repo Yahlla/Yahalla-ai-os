@@ -3,6 +3,7 @@ import { createHmac, randomUUID } from 'node:crypto'
 import { createServer as createFakeHttpServer } from 'node:http'
 import { after, before, test } from 'node:test'
 import { closePool, getPool } from '../src/db.js'
+import { signOAuthState } from '../src/githubOAuth.js'
 import { createPlatformServer } from '../src/server.js'
 
 const JWT_SECRET = 'test-secret-not-for-production'
@@ -49,6 +50,16 @@ let fakeUpstreamBehavior: 'ok' | 'upstream-error' = 'ok'
 const WEBHOOK_SECRET = 'test-webhook-secret'
 let webhookServer: import('node:http').Server
 let webhookBaseUrl: string
+
+// A fourth server instance with "Sign in with GitHub" configured (client
+// id/secret + a frontend origin to redirect back to) -- separate from
+// httpServer (which has neither, to prove the flow stays disabled without
+// them) the same way webhookServer is separate from the plain one above.
+const OAUTH_CLIENT_ID = 'test-oauth-client-id'
+const OAUTH_CLIENT_SECRET = 'test-oauth-client-secret'
+const OAUTH_FRONTEND_URL = 'http://localhost:5173'
+let oauthServer: import('node:http').Server
+let oauthBaseUrl: string
 
 before(async () => {
   process.env.DATABASE_URL = process.env.TEST_DATABASE_URL
@@ -97,6 +108,21 @@ before(async () => {
   const webhookAddress = webhookServer.address()
   const webhookPort = typeof webhookAddress === 'object' && webhookAddress ? webhookAddress.port : 0
   webhookBaseUrl = `http://127.0.0.1:${webhookPort}`
+
+  const oauthSrv = createPlatformServer({
+    port: 0,
+    supabaseJwtSecret: JWT_SECRET,
+    allowedOrigins: [],
+    cloudTier: null,
+    githubOAuthClientId: OAUTH_CLIENT_ID,
+    githubOAuthClientSecret: OAUTH_CLIENT_SECRET,
+    frontendUrl: OAUTH_FRONTEND_URL,
+  })
+  oauthServer = oauthSrv
+  await new Promise<void>((resolve) => oauthServer.listen(0, '127.0.0.1', () => resolve()))
+  const oauthAddress = oauthServer.address()
+  const oauthPort = typeof oauthAddress === 'object' && oauthAddress ? oauthAddress.port : 0
+  oauthBaseUrl = `http://127.0.0.1:${oauthPort}`
 })
 
 after(async () => {
@@ -104,6 +130,7 @@ after(async () => {
   cloudTierServer.close()
   fakeUpstream.close()
   webhookServer.close()
+  oauthServer.close()
   await closePool()
 })
 
@@ -1061,4 +1088,173 @@ test('a human ships a real branch/commit/PR from a plain-language instruction, n
     fakeAnthropic.close()
     codeRequestServer.close()
   }
+})
+
+// GitHub OAuth ("Sign in with GitHub"): a real one-click authorize flow
+// replacing copy-pasting a Personal Access Token. Run against oauthServer
+// (the only instance configured with a Client ID/Secret + frontend URL);
+// httpServer (no OAuth config) proves the flow stays cleanly disabled
+// rather than half-working without it.
+
+async function oauthApi(path: string, init: RequestInit = {}, token?: string): Promise<{ status: number; body: any }> {
+  const response = await fetch(`${oauthBaseUrl}${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers },
+  })
+  return { status: response.status, body: (await response.json()) as any }
+}
+
+// The fake GitHub stands in for both github.com (token exchange) and
+// api.github.com (/user) at once -- githubOAuth.ts and
+// validateGithubTokenAndFetchUsername each read their own independently
+// overridable base URL env var, so both are pointed at the same fake
+// server here.
+async function withFakeGithubOAuth(
+  handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void,
+  run: (fakeBaseUrl: string) => Promise<void>,
+): Promise<void> {
+  const fake = createFakeHttpServer(handler)
+  await new Promise<void>((resolve) => fake.listen(0, '127.0.0.1', () => resolve()))
+  const address = fake.address()
+  const port = typeof address === 'object' && address ? address.port : 0
+  const fakeBaseUrl = `http://127.0.0.1:${port}`
+  const previousOAuthBase = process.env.GITHUB_OAUTH_BASE_URL
+  const previousApiBase = process.env.GITHUB_API_BASE_URL
+  process.env.GITHUB_OAUTH_BASE_URL = fakeBaseUrl
+  process.env.GITHUB_API_BASE_URL = fakeBaseUrl
+  try {
+    await run(fakeBaseUrl)
+  } finally {
+    if (previousOAuthBase === undefined) delete process.env.GITHUB_OAUTH_BASE_URL
+    else process.env.GITHUB_OAUTH_BASE_URL = previousOAuthBase
+    if (previousApiBase === undefined) delete process.env.GITHUB_API_BASE_URL
+    else process.env.GITHUB_API_BASE_URL = previousApiBase
+    fake.close()
+  }
+}
+
+test('POST /auth/github/start is disabled (503) when no OAuth app is configured', async () => {
+  const { status, body } = await api('/auth/github/start', { method: 'POST' }, humanJwt)
+  assert.equal(status, 503)
+  assert.match(body.error, /Personal Access Token/)
+})
+
+test('GET /auth/github/callback is disabled (404) when no OAuth app is configured', async () => {
+  const response = await fetch(`${baseUrl}/auth/github/callback?code=x&state=y`, { redirect: 'manual' })
+  assert.equal(response.status, 404)
+})
+
+test('POST /auth/github/start requires a human, not a device', async () => {
+  const pairing = await oauthApi('/pair_device', { method: 'POST', body: JSON.stringify({ device_name: 'OAuth Test Device' }) }, humanJwt)
+  const exchange = await oauthApi('/device_exchange', { method: 'POST', body: JSON.stringify({ code: pairing.body.pairing_code, device_name: 'OAuth Test Device' }) })
+  const deviceToken = exchange.body.token as string
+
+  const { status, body } = await oauthApi('/auth/github/start', { method: 'POST' }, deviceToken)
+  assert.equal(status, 403)
+  assert.match(body.error, /human/)
+})
+
+test('POST /auth/github/start mints a real github.com authorize URL carrying a signed state', async () => {
+  const { status, body } = await oauthApi('/auth/github/start', { method: 'POST' }, humanJwt)
+  assert.equal(status, 200)
+  assert.equal(body.success, true)
+  const url = new URL(body.url)
+  assert.equal(url.origin, 'https://github.com')
+  assert.equal(url.pathname, '/login/oauth/authorize')
+  assert.equal(url.searchParams.get('client_id'), OAUTH_CLIENT_ID)
+  assert.match(url.searchParams.get('redirect_uri') ?? '', /\/auth\/github\/callback$/)
+  assert.ok(url.searchParams.get('state'))
+})
+
+test('the callback redirects to the frontend with an error when GitHub denies the request', async () => {
+  const response = await fetch(`${oauthBaseUrl}/auth/github/callback?error=access_denied&error_description=User+denied`, { redirect: 'manual' })
+  assert.equal(response.status, 302)
+  const location = new URL(response.headers.get('location') ?? '')
+  assert.equal(location.origin, OAUTH_FRONTEND_URL)
+  assert.equal(location.searchParams.get('github_oauth'), 'error')
+  assert.match(location.searchParams.get('message') ?? '', /User denied/)
+})
+
+test('the callback redirects to the frontend with an error when code or state is missing', async () => {
+  const response = await fetch(`${oauthBaseUrl}/auth/github/callback`, { redirect: 'manual' })
+  assert.equal(response.status, 302)
+  const location = new URL(response.headers.get('location') ?? '')
+  assert.equal(location.searchParams.get('github_oauth'), 'error')
+})
+
+test('the callback rejects an invalid/tampered state instead of trusting it', async () => {
+  const response = await fetch(`${oauthBaseUrl}/auth/github/callback?code=whatever&state=not-a-real-state`, { redirect: 'manual' })
+  assert.equal(response.status, 302)
+  const location = new URL(response.headers.get('location') ?? '')
+  assert.equal(location.searchParams.get('github_oauth'), 'error')
+  assert.match(location.searchParams.get('message') ?? '', /expired or is invalid/)
+})
+
+test('the callback rejects a state signed for this same user but with the wrong secret', async () => {
+  const wrongSecretState = signOAuthState('some-other-secret', humanUserId)
+  const response = await fetch(`${oauthBaseUrl}/auth/github/callback?code=whatever&state=${wrongSecretState}`, { redirect: 'manual' })
+  assert.equal(response.status, 302)
+  const location = new URL(response.headers.get('location') ?? '')
+  assert.equal(location.searchParams.get('github_oauth'), 'error')
+})
+
+test('the callback surfaces a clean error when GitHub rejects the code exchange', async () => {
+  await withFakeGithubOAuth(
+    (req, res) => {
+      if (req.url === '/login/oauth/access_token') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'bad_verification_code', error_description: 'The code passed is incorrect or expired.' }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      const validState = signOAuthState(OAUTH_CLIENT_SECRET, humanUserId)
+      const response = await fetch(`${oauthBaseUrl}/auth/github/callback?code=bad-code&state=${validState}`, { redirect: 'manual' })
+      assert.equal(response.status, 302)
+      const location = new URL(response.headers.get('location') ?? '')
+      assert.equal(location.searchParams.get('github_oauth'), 'error')
+      assert.match(location.searchParams.get('message') ?? '', /incorrect or expired/)
+    },
+  )
+})
+
+test('a full successful OAuth round trip exchanges the code, validates the token, and connects GitHub', async () => {
+  await withFakeGithubOAuth(
+    (req, res) => {
+      if (req.url === '/login/oauth/access_token' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ access_token: 'gho_fake_oauth_token', token_type: 'bearer', scope: 'repo' }))
+        return
+      }
+      if (req.url === '/user') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ login: 'yahalla-oauth-user' }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      const validState = signOAuthState(OAUTH_CLIENT_SECRET, humanUserId)
+      const response = await fetch(`${oauthBaseUrl}/auth/github/callback?code=good-code&state=${validState}`, { redirect: 'manual' })
+      assert.equal(response.status, 302)
+      const location = new URL(response.headers.get('location') ?? '')
+      assert.equal(location.origin, OAUTH_FRONTEND_URL)
+      assert.equal(location.searchParams.get('github_oauth'), 'success')
+
+      const status = await oauthApi('/settings/github', {}, humanJwt)
+      assert.equal(status.body.configured, true)
+      assert.equal(status.body.username, 'yahalla-oauth-user')
+    },
+  )
+})
+
+test('GET /settings/github reports oauthAvailable per-deployment', async () => {
+  const withoutOAuth = await api('/settings/github', {}, humanJwt)
+  assert.equal(withoutOAuth.body.oauthAvailable, false)
+
+  const withOAuth = await oauthApi('/settings/github', {}, humanJwt)
+  assert.equal(withOAuth.body.oauthAvailable, true)
 })
