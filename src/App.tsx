@@ -1424,6 +1424,7 @@ function HealthSection() {
 function CloudTierSettingsCard() {
   const [status, setStatus] = useState<platformApi.CloudTierStatus | null>(null)
   const [loading, setLoading] = useState(true)
+  const [provider, setProvider] = useState<'anthropic' | 'openai'>('anthropic')
   const [apiKey, setApiKey] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -1433,7 +1434,10 @@ function CloudTierSettingsCard() {
 
   function load() {
     setLoading(true)
-    platformApi.getCloudTierStatus().then(setStatus).finally(() => setLoading(false))
+    platformApi.getCloudTierStatus().then((s) => {
+      setStatus(s)
+      if (s.provider) setProvider(s.provider)
+    }).finally(() => setLoading(false))
   }
 
   useEffect(() => {
@@ -1449,6 +1453,7 @@ function CloudTierSettingsCard() {
       apiKey: apiKey.trim(),
       url: url.trim() || undefined,
       model: model.trim() || undefined,
+      provider,
     })
     setSaving(false)
     if (!result.ok) {
@@ -1461,33 +1466,67 @@ function CloudTierSettingsCard() {
 
   if (!platformApi.isPlatformApiConfigured()) return null
 
+  const isAnthropic = provider === 'anthropic'
+
   return (
     <div className="info-panel" style={{ marginTop: 20 }}>
       <div className="info-panel-header">
         <Sparkles size={18} />
-        <span>Cloud Smart Tier (70B, opt-in)</span>
+        <span>Cloud Smart Tier (opt-in)</span>
         {!loading && status && (
           <span className={`status-badge ${status.configured ? 'badge-success' : 'badge-unknown'}`} style={{ marginInlineStart: 'auto' }}>
-            {status.configured ? `Connected · ${status.model ?? 'configured'}` : 'Not configured'}
+            {status.configured ? `Connected · ${status.provider === 'anthropic' ? 'Claude' : 'OpenAI-compatible'} · ${status.model ?? 'configured'}` : 'Not configured'}
           </span>
         )}
       </div>
       <div className="info-panel-body">
         <p className="data-card-desc" style={{ marginBottom: 12 }}>
-          Free-tier 70B-class model as an optional escalation, kept server-side only -- the key never leaves this
-          server or reaches the browser. Get a free key at{' '}
-          <a href="https://console.groq.com" target="_blank" rel="noreferrer">console.groq.com</a>.
+          A real AI backend, kept server-side only -- the key never leaves this server or reaches the browser. This
+          is what answers chat on any device with no local Runtime and no browser WebGPU (e.g. iOS Safari), and can
+          be used for every device if you'd rather run fully cloud-based with no local Agent at all.
         </p>
+        <div className="segmented-control" style={{ marginBottom: 12 }}>
+          <button
+            type="button"
+            className={`mini-button ${isAnthropic ? 'active' : ''}`}
+            onClick={() => setProvider('anthropic')}
+          >
+            Claude (Anthropic)
+          </button>
+          <button
+            type="button"
+            className={`mini-button ${!isAnthropic ? 'active' : ''}`}
+            onClick={() => setProvider('openai')}
+          >
+            OpenAI-compatible (Groq, etc.)
+          </button>
+        </div>
         {error && <p className="data-card-desc" style={{ color: '#fca5a5', marginBottom: 8 }}>{error}</p>}
         <form onSubmit={handleSave}>
           <input
             className="text-input"
             type="password"
-            placeholder={status?.configured ? 'Replace saved key…' : 'Groq API key (gsk_...)'}
+            placeholder={
+              status?.configured
+                ? 'Replace saved key…'
+                : isAnthropic
+                  ? 'Anthropic API key (sk-ant-...)'
+                  : 'Groq API key (gsk_...)'
+            }
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             style={{ width: '100%', marginBottom: 8 }}
           />
+          {isAnthropic ? (
+            <p className="data-card-desc" style={{ marginBottom: 8 }}>
+              Get a key at <a href="https://console.anthropic.com" target="_blank" rel="noreferrer">console.anthropic.com</a>.
+              Uses <code>claude-opus-5</code> by default -- change it below if you want a different model.
+            </p>
+          ) : (
+            <p className="data-card-desc" style={{ marginBottom: 8 }}>
+              Get a free key at <a href="https://console.groq.com" target="_blank" rel="noreferrer">console.groq.com</a>.
+            </p>
+          )}
           <button type="button" className="mini-button" onClick={() => setShowAdvanced((v) => !v)} style={{ marginBottom: 8 }}>
             {showAdvanced ? 'Hide' : 'Show'} advanced options
           </button>
@@ -1495,14 +1534,14 @@ function CloudTierSettingsCard() {
             <>
               <input
                 className="text-input"
-                placeholder="Upstream URL (default: Groq's OpenAI-compatible endpoint)"
+                placeholder={`Upstream URL (default: ${isAnthropic ? "Anthropic's API" : "Groq's OpenAI-compatible endpoint"})`}
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 style={{ width: '100%', marginBottom: 8 }}
               />
               <input
                 className="text-input"
-                placeholder="Model (default: llama-3.3-70b-versatile)"
+                placeholder={`Model (default: ${isAnthropic ? 'claude-opus-5' : 'llama-3.3-70b-versatile'})`}
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 style={{ width: '100%', marginBottom: 8 }}

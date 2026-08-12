@@ -23,9 +23,9 @@ if (!process.env.DATABASE_URL) {
   process.exit(1)
 }
 if (cloudTier) {
-  console.log(`[platform-api] cloud smart tier enabled: ${cloudTier.url} (${cloudTier.model})`)
+  console.log(`[platform-api] cloud smart tier enabled: ${cloudTier.provider} ${cloudTier.url} (${cloudTier.model})`)
 } else {
-  console.log('[platform-api] cloud smart tier disabled (CLOUD_TIER_API_KEY not set)')
+  console.log('[platform-api] cloud smart tier disabled (set ANTHROPIC_API_KEY for real Claude, or CLOUD_TIER_API_KEY for an OpenAI-compatible provider)')
 }
 if (githubWebhookSecret) {
   console.log('[platform-api] GitHub push webhook enabled: POST /webhooks/github')

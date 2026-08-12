@@ -647,6 +647,18 @@ button {
   background: rgba(239,68,68,.15);
 }
 
+.mini-button.active {
+  color: #fff;
+  border-color: rgba(129,140,248,.4);
+  background: rgba(129,140,248,.18);
+}
+
+.segmented-control {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 /* Deployments diff view */
 
 .deployments-grid .deployment-card {

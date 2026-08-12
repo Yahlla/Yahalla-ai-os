@@ -570,11 +570,13 @@ export function createPlatformServer(config: PlatformConfig) {
         const body = await readJsonBody(req)
         const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : ''
         if (!apiKey) return send(res, 400, { success: false, error: 'api_key is required.' })
+        const provider = body.provider === 'anthropic' ? 'anthropic' : body.provider === 'openai' ? 'openai' : undefined
         try {
           await saveCloudTierSettings(identity.userId, {
             apiKey,
             url: typeof body.url === 'string' && body.url.trim() ? body.url.trim() : undefined,
             model: typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined,
+            provider,
           })
         } catch (error) {
           const code = (error as { code?: string } | null)?.code

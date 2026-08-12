@@ -106,18 +106,23 @@ export async function cloudTierChat(messages: { role: string; content: string }[
 // to the database (platform_settings, RLS-gated to admins) from the
 // Control Center's Settings page instead of editing platform/.env by
 // hand. Takes effect on the very next chat message, no redeploy.
-export type CloudTierStatus = { configured: boolean; model: string | null; url: string | null }
+export type CloudTierStatus = { configured: boolean; model: string | null; url: string | null; provider: 'openai' | 'anthropic' | null }
 
 export async function getCloudTierStatus(): Promise<CloudTierStatus> {
   const res = await platformFetch('/settings/cloud-tier')
-  if (!res?.ok) return { configured: false, model: null, url: null }
+  if (!res?.ok) return { configured: false, model: null, url: null, provider: null }
   return (await res.json()) as CloudTierStatus
 }
 
-export async function saveCloudTierSettings(settings: { apiKey: string; url?: string; model?: string }): Promise<{ ok: true } | { ok: false; error: string }> {
+export async function saveCloudTierSettings(settings: {
+  apiKey: string
+  url?: string
+  model?: string
+  provider?: 'openai' | 'anthropic'
+}): Promise<{ ok: true } | { ok: false; error: string }> {
   const res = await platformFetch('/settings/cloud-tier', {
     method: 'POST',
-    body: JSON.stringify({ api_key: settings.apiKey, url: settings.url, model: settings.model }),
+    body: JSON.stringify({ api_key: settings.apiKey, url: settings.url, model: settings.model, provider: settings.provider }),
   })
   if (!res) return { ok: false, error: 'Platform server is not configured.' }
   const data = (await res.json()) as { success?: boolean; error?: string }

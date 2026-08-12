@@ -83,7 +83,7 @@ before(async () => {
     port: 0,
     supabaseJwtSecret: JWT_SECRET,
     allowedOrigins: [],
-    cloudTier: { url: `http://127.0.0.1:${upstreamPort}`, model: 'fake-70b', apiKey: 'fake-key' },
+    cloudTier: { provider: 'openai', url: `http://127.0.0.1:${upstreamPort}`, model: 'fake-70b', apiKey: 'fake-key' },
   })
   cloudTierServer = cloudServer
   await new Promise<void>((resolve) => cloudTierServer.listen(0, '127.0.0.1', () => resolve()))

@@ -68,15 +68,30 @@ where:
 ## Cloud smart tier (opt-in, off by default)
 
 An additional escalation path for heavier reasoning than the local/browser
-models can do, forwarding a chat request to a free-tier OpenAI-compatible
-provider (Groq's `llama-3.3-70b-versatile` by default). Deliberately built
-as its own narrow thing, not folded into local-runtime's `chatCompletion`:
+models can do, and the automatic fallback for any device with no
+local-runtime and no browser WebGPU (iOS Safari, most commonly) -- without
+it, those devices hit the legacy "No AI model is currently online" error
+instead of a working chat. Two providers, both reached through the same
+narrow, server-side path, not folded into local-runtime's `chatCompletion`:
+
+- **Anthropic (real Claude)**, via the official `@anthropic-ai/sdk` --
+  `ANTHROPIC_API_KEY`, model defaults to `claude-opus-5`. This is also the
+  path to running the whole platform with **no local Agent required at
+  all**: set this one key and every device, regardless of what it has
+  installed, gets a real, fully capable AI for chat.
+- **Any OpenAI-compatible provider** (Groq's `llama-3.3-70b-versatile` by
+  default, or a self-hosted vLLM/llama.cpp/Ollama server) -- `CLOUD_TIER_API_KEY`.
+
+`ANTHROPIC_API_KEY` wins when both are set in `platform/.env`
+(`cloudTier.ts`'s `loadCloudTierConfig`); the Settings page lets an admin
+pick either provider explicitly and always overrides the env-var default
+once saved.
 
 - **The upstream API key never leaves this server.** The browser only ever
   calls `POST /smart-tier/chat` on platform-api with the user's own
-  Supabase session token; platform-api holds `CLOUD_TIER_API_KEY` and
-  attaches it server-side. No client-side code path ever sees the key.
-- **Off by default, all the way off.** Leave `CLOUD_TIER_API_KEY` unset in
+  Supabase session token; platform-api holds the provider key and attaches
+  it server-side. No client-side code path ever sees the key.
+- **Off by default, all the way off.** Leave both keys unset in
   `platform/.env` and the route always returns 503 -- there is no
   half-enabled state.
 - **local-runtime is untouched.** `local-runtime/src/llm.ts`'s
@@ -84,22 +99,24 @@ as its own narrow thing, not folded into local-runtime's `chatCompletion`:
   calls anything outside `127.0.0.1` -- this cloud tier is a completely
   separate code path so that invariant stays true.
 - **Portable by construction.** `CLOUD_TIER_URL` / `CLOUD_TIER_MODEL` are
-  the only things that change to point this at a self-hosted,
-  OpenAI-compatible server later (vLLM, llama.cpp's server, Ollama) instead
-  of a free-tier provider -- no code change, just `platform/.env`.
+  the only things that change to point the OpenAI-compatible path at a
+  self-hosted server instead of a free-tier provider -- no code change,
+  just `platform/.env`.
 
-**To enable, no terminal needed:** get a free API key from
-https://console.groq.com, then sign in to the Control Center as the
-platform owner/admin and paste it into **Settings → Cloud Smart Tier**.
-Saved to the `platform_settings` table (RLS-gated to `is_admin()`, see the
-`20260815000000_platform_settings.sql` migration and `api/src/settings.ts`)
-and takes effect on the very next chat message -- no restart, no redeploy.
-The Settings page also shows a live "Connected · &lt;model&gt;" badge the
-moment it's saved.
+**To enable, no terminal needed:** sign in to the Control Center as the
+platform owner/admin, open **Settings → Cloud Smart Tier**, pick Claude or
+an OpenAI-compatible provider, and paste in the key (a real Anthropic key
+from https://console.anthropic.com, or a free Groq key from
+https://console.groq.com). Saved to the `platform_settings` table
+(RLS-gated to `is_admin()`, see the `20260815000000_platform_settings.sql`
+migration and `api/src/settings.ts`) and takes effect on the very next chat
+message -- no restart, no redeploy. The Settings page also shows a live
+"Connected · Claude/OpenAI-compatible · &lt;model&gt;" badge the moment it's
+saved.
 
-`CLOUD_TIER_API_KEY` in `platform/.env` still works as a bootstrap
-default for operators who prefer it, but the database always wins when
-both are set (`cloudTier.ts`'s `resolveCloudTierConfig`).
+`ANTHROPIC_API_KEY` / `CLOUD_TIER_API_KEY` in `platform/.env` still work as
+bootstrap defaults for operators who prefer them, but the database always
+wins when both are set (`cloudTier.ts`'s `resolveCloudTierConfig`).
 
 then `cd platform && docker compose --env-file .env up -d --build`.
 
