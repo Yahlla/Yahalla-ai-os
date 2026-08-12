@@ -954,6 +954,82 @@ function DiffView({ diff }: { diff: string }) {
   )
 }
 
+// Real per-tool detail cards for the chat's toolActivity chips -- built
+// only from data the tool actually returned (arguments/result), never
+// invented. patch_project_file gets a real diff view (old_text/new_text,
+// both real, are exactly what the tool matched and wrote); write_project_
+// file shows the real content written; everything else shows a compact
+// summary of its actual result.
+function ToolActivityCard({ activity }: { activity: { tool: string; arguments?: Record<string, unknown>; result: Record<string, unknown> } }) {
+  const { tool, arguments: args, result } = activity
+  const ok = result.success !== false
+
+  if (tool === 'patch_project_file' && typeof args?.old_text === 'string' && typeof args?.new_text === 'string') {
+    const diffText = [
+      ...String(args.old_text).split('\n').map((l) => `-${l}`),
+      ...String(args.new_text).split('\n').map((l) => `+${l}`),
+    ].join('\n')
+    return (
+      <div className="tool-detail-card">
+        <div className="tool-detail-header"><FileText size={12} /> {String(args.path ?? '')}</div>
+        <DiffView diff={diffText} />
+      </div>
+    )
+  }
+
+  if (tool === 'write_project_file' && typeof args?.content === 'string') {
+    return (
+      <div className="tool-detail-card">
+        <div className="tool-detail-header"><FileText size={12} /> {String(args.path ?? '')}</div>
+        <pre className="tool-detail-code">{String(args.content)}</pre>
+      </div>
+    )
+  }
+
+  if ((tool === 'db_query' || tool === 'db_execute') && typeof args?.query === 'string') {
+    return (
+      <div className="tool-detail-card">
+        <div className="tool-detail-header"><Server size={12} /> {tool === 'db_execute' ? 'SQL (write)' : 'SQL (read)'}</div>
+        <pre className="tool-detail-code">{String(args.query)}</pre>
+        {ok && typeof result.row_count === 'number' && (
+          <div className="tool-detail-footer">{result.row_count} row(s)</div>
+        )}
+        {!ok && <div className="tool-detail-footer error">{String(result.message ?? result.error ?? 'Failed')}</div>}
+      </div>
+    )
+  }
+
+  if (tool === 'github.open_pr' && ok && result.pull_request) {
+    const pr = result.pull_request as { number?: number; html_url?: string; title?: string }
+    return (
+      <div className="tool-detail-card">
+        <div className="tool-detail-header"><GitBranch size={12} /> Pull Request #{pr.number}</div>
+        <a href={pr.html_url} target="_blank" rel="noreferrer" className="tool-detail-link">{pr.title} &rarr; {pr.html_url}</a>
+      </div>
+    )
+  }
+
+  if ((tool === 'git_commit' || tool === 'git_push') && typeof args?.message === 'string') {
+    return (
+      <div className="tool-detail-card">
+        <div className="tool-detail-header"><GitBranch size={12} /> {tool}</div>
+        <div className="tool-detail-footer">{String(args.message)}</div>
+      </div>
+    )
+  }
+
+  if (!ok) {
+    return (
+      <div className="tool-detail-card">
+        <div className="tool-detail-header"><Wrench size={12} /> {tool}</div>
+        <div className="tool-detail-footer error">{String(result.message ?? result.error ?? 'Failed')}</div>
+      </div>
+    )
+  }
+
+  return null
+}
+
 function DeploymentsSection(_props: { profile: Profile }) {
   const [deployments, setDeployments] = useState<DeploymentProposal[]>([])
   const [loading, setLoading] = useState(true)
@@ -1741,7 +1817,7 @@ type ChatMessage = {
   createdAt: Date
   taskId?: string
   agent?: string
-  toolActivity?: { tool: string; result: Record<string, unknown> }[]
+  toolActivity?: { tool: string; arguments?: Record<string, unknown>; result: Record<string, unknown> }[]
   error?: boolean
   attachments?: { name: string; size: number }[]
   imageDataUrl?: string
@@ -2036,6 +2112,17 @@ function ChatSection() {
   const [showTechnical, setShowTechnical] = useState(false)
   const [lastResult, setLastResult] = useState<ChatResponse | null>(null)
   const [liveStatus, setLiveStatus] = useState<{ state: string; summary: string | null } | null>(null)
+  // The Live Thinking Card: a running timeline of what local-runtime's
+  // agentLoop has actually done so far for the in-flight request (real
+  // embodiment.transition() calls streamed over SSE -- see
+  // local-runtime/src/agentLoop.ts -- never invented step text). Reset at
+  // the start of every send; only local-runtime chats populate it, since
+  // that's the only tier with this telemetry.
+  const [thinkingSteps, setThinkingSteps] = useState<{ state: string; summary: string; ts: number }[]>([])
+  // "<messageId>:<toolActivityIndex>" of the one tool-activity detail card
+  // currently expanded, or null. Only one open at a time, click again to
+  // collapse -- keeps the transcript from becoming a wall of open diffs.
+  const [expandedToolActivity, setExpandedToolActivity] = useState<string | null>(null)
   const [modelLoadProgress, setModelLoadProgress] = useState<{ progress: number; text: string } | null>(null)
   const [modelLoadStalled, setModelLoadStalled] = useState(false)
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null)
@@ -2109,6 +2196,10 @@ function ChatSection() {
       .subscribeLiveStatus((update) => {
         if (update.kind === 'embodiment') {
           setLiveStatus({ state: update.state, summary: update.summary })
+          if (update.summary) {
+            const summary = update.summary
+            setThinkingSteps((prev) => [...prev, { state: update.state, summary, ts: Date.now() }].slice(-8))
+          }
         }
       })
       .then((unsub) => {
@@ -2588,6 +2679,7 @@ function ChatSection() {
 
     setMessages((prev) => [...prev, userMessage])
     setSending(true)
+    setThinkingSteps([])
 
     try {
       // Three-tier local-first fallback, in order of preference:
@@ -2775,7 +2867,7 @@ function ChatSection() {
           createdAt: new Date(),
           taskId: result.task_id,
           agent: result.agent?.key,
-          toolActivity: result.executed_tools as { tool: string; result: Record<string, unknown> }[],
+          toolActivity: result.executed_tools as { tool: string; arguments?: Record<string, unknown>; result: Record<string, unknown> }[],
           error: !result.success,
           viaCloudBoost: usedCloudBoostModel,
           approvalId: result.approval_required ? result.tool_execution_id : undefined,
@@ -2861,7 +2953,7 @@ function ChatSection() {
                 ...m,
                 content,
                 error: !result.success,
-                toolActivity: (result.executed_tools as { tool: string; result: Record<string, unknown> }[]) ?? m.toolActivity,
+                toolActivity: (result.executed_tools as { tool: string; arguments?: Record<string, unknown>; result: Record<string, unknown> }[]) ?? m.toolActivity,
                 approvalDecision: decision === 'approve' ? 'approved' : 'rejected',
               }
             : m,
@@ -2909,8 +3001,11 @@ function ChatSection() {
     <div className="chat-page">
       <div className="chat-header">
         <div className="chat-agent">
-          <div className="agent-avatar">
-            <Cpu size={20} />
+          <div className="agent-avatar living-avatar" title="Yahalla Core -- live">
+            <div className="living-face">
+              <span className="living-eye left" />
+              <span className="living-eye right" />
+            </div>
             <span className="agent-live" />
           </div>
           <div>
@@ -3089,14 +3184,26 @@ function ChatSection() {
                   )}
                   {message.toolActivity && message.toolActivity.length > 0 && (
                     <div className="tool-activity">
-                      {message.toolActivity.map((ta, i) => (
-                        <div key={i} className="tool-activity-item">
-                          <Wrench size={11} />
-                          {ta.tool}
-                        </div>
-                      ))}
+                      {message.toolActivity.map((ta, i) => {
+                        const key = `${message.id}:${i}`
+                        const expanded = expandedToolActivity === key
+                        return (
+                          <button
+                            key={i}
+                            type="button"
+                            className={`tool-activity-item ${ta.result.success === false ? 'failed' : ''}`}
+                            onClick={() => setExpandedToolActivity(expanded ? null : key)}
+                          >
+                            <Wrench size={11} />
+                            {ta.tool}
+                          </button>
+                        )
+                      })}
                     </div>
                   )}
+                  {message.toolActivity
+                    ?.filter((_, i) => expandedToolActivity === `${message.id}:${i}`)
+                    .map((ta, i) => <ToolActivityCard key={i} activity={ta} />)}
                   {(messageArtifacts.get(message.id) ?? []).map((artifact) => (
                     <button
                       key={artifact.id}
@@ -3120,12 +3227,26 @@ function ChatSection() {
                   <div className="message-meta">
                     Yahalla Core <span>processing</span>
                   </div>
-                  <div className="message-bubble typing">
-                    <span />
-                    <span />
-                    <span />
-                    <em>{liveStatus?.summary || 'Processing request…'}</em>
-                  </div>
+                  {thinkingSteps.length > 0 ? (
+                    <div className="thinking-card">
+                      {thinkingSteps.map((step, i) => {
+                        const isLast = i === thinkingSteps.length - 1
+                        return (
+                          <div key={step.ts} className={`thinking-step ${isLast ? 'active' : 'done'}`}>
+                            <span className={`thinking-dot ${isLast ? 'pulse' : ''}`} />
+                            {step.summary}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <div className="message-bubble typing">
+                      <span />
+                      <span />
+                      <span />
+                      <em>{liveStatus?.summary || 'Processing request…'}</em>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -3363,10 +3484,20 @@ function ChatSection() {
 
 type NavItem = { label: Page; icon: typeof MessageSquare; adminOnly?: boolean }
 
+// Sidebar sectioning: Chat Sessions (day-to-day work) / Integrations (every
+// place a real external connection lives -- devices, servers, and the
+// Integrations Hub card inside Settings) / Control Center (everything else
+// administrative). Grouped instead of one long flat list.
 const userNav: NavItem[] = [
   { label: 'Chat', icon: MessageSquare },
   { label: 'Projects', icon: FolderKanban },
   { label: 'Tasks', icon: FileText },
+]
+
+const integrationsNav: NavItem[] = [
+  { label: 'Devices', icon: Laptop, adminOnly: true },
+  { label: 'Servers', icon: Server, adminOnly: true },
+  { label: 'Settings', icon: Settings, adminOnly: true },
 ]
 
 const adminNav: NavItem[] = [
@@ -3374,15 +3505,12 @@ const adminNav: NavItem[] = [
   { label: 'Agents', icon: Bot, adminOnly: true },
   { label: 'Tools', icon: Wrench, adminOnly: true },
   { label: 'Models', icon: Cpu, adminOnly: true },
-  { label: 'Servers', icon: Server, adminOnly: true },
-  { label: 'Devices', icon: Laptop, adminOnly: true },
   { label: 'Approvals', icon: ShieldCheck, adminOnly: true },
   { label: 'Deployments', icon: GitBranch, adminOnly: true },
   { label: 'Permissions', icon: Shield, adminOnly: true },
   { label: 'Users', icon: Users, adminOnly: true },
   { label: 'Logs', icon: Activity, adminOnly: true },
   { label: 'Health', icon: Monitor, adminOnly: true },
-  { label: 'Settings', icon: Settings, adminOnly: true },
 ]
 
 // =============================================================
@@ -3400,7 +3528,6 @@ function ControlCenter({
   const [mobileOpen, setMobileOpen] = useState(false)
 
   const isAdminUser = profile.role === 'owner' || profile.role === 'admin'
-  const navItems = isAdminUser ? [...userNav, ...adminNav] : userNav
 
   function renderPage() {
     switch (active) {
@@ -3462,28 +3589,34 @@ function ControlCenter({
           <span>New conversation</span>
         </button>
 
-        <div className="nav-label">{isAdminUser ? 'CONTROL CENTER' : 'WORKSPACE'}</div>
-
-        <nav className="nav-list">
-          {navItems.map((item) => {
-            const Icon = item.icon
-            const selected = active === item.label
-            return (
-              <button
-                key={item.label}
-                onClick={() => {
-                  setActive(item.label)
-                  setMobileOpen(false)
-                }}
-                className={`nav-item ${selected ? 'active' : ''}`}
-              >
-                <Icon size={17} />
-                <span>{item.label}</span>
-                {selected && <ChevronRight size={15} className="nav-arrow" />}
-              </button>
-            )
-          })}
-        </nav>
+        {[
+          { title: 'WORKSPACE', items: userNav },
+          ...(isAdminUser ? [{ title: 'INTEGRATIONS', items: integrationsNav }, { title: 'CONTROL CENTER', items: adminNav }] : []),
+        ].map((group) => (
+          <div key={group.title}>
+            <div className="nav-label">{group.title}</div>
+            <nav className="nav-list">
+              {group.items.map((item) => {
+                const Icon = item.icon
+                const selected = active === item.label
+                return (
+                  <button
+                    key={item.label}
+                    onClick={() => {
+                      setActive(item.label)
+                      setMobileOpen(false)
+                    }}
+                    className={`nav-item ${selected ? 'active' : ''}`}
+                  >
+                    <Icon size={17} />
+                    <span>{item.label}</span>
+                    {selected && <ChevronRight size={15} className="nav-arrow" />}
+                  </button>
+                )
+              })}
+            </nav>
+          </div>
+        ))}
 
         <div className="sidebar-spacer" />
 

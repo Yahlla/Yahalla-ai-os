@@ -55,7 +55,8 @@ button {
    ============================================================= */
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   display: flex;
   background:
     radial-gradient(circle at 75% -10%, rgba(102, 81, 255, 0.13), transparent 32%),
@@ -63,12 +64,13 @@ button {
     #07090d;
 }
 
-/* Sidebar */
+/* Sidebar -- fixed in place, scrolls independently of the chat body so a
+   long nav list never drags the chat header/composer along with it. */
 
 .sidebar {
   width: 258px;
   flex-shrink: 0;
-  min-height: 100vh;
+  height: 100%;
   display: flex;
   flex-direction: column;
   padding: 18px 14px;
@@ -76,6 +78,18 @@ button {
   background: linear-gradient(180deg, rgba(18,21,28,.98), rgba(10,12,17,.98));
   backdrop-filter: blur(20px);
   box-shadow: var(--surface-shadow);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,.12) transparent;
+}
+
+.sidebar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,.1);
+  border-radius: 99px;
 }
 
 .sidebar-brand {
@@ -994,6 +1008,42 @@ button {
   box-shadow: 0 0 28px rgba(105,94,255,.08);
 }
 
+/* A lightweight animated presence indicator, not a video -- there is no
+   video asset to show, and faking one with a static image labeled "live"
+   would be dishonest. A subtle idle tilt + periodic eye-blink is what
+   reads as "alive" without claiming to be footage of anything. */
+.living-avatar {
+  overflow: hidden;
+}
+
+.living-face {
+  display: flex;
+  gap: 6px;
+  animation: living-tilt 6s ease-in-out infinite;
+}
+
+.living-eye {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #d9dcff;
+  animation: living-blink 4.5s ease-in-out infinite;
+}
+
+.living-eye.right {
+  animation-delay: .06s;
+}
+
+@keyframes living-tilt {
+  0%, 100% { transform: rotate(0deg) translateY(0); }
+  50% { transform: rotate(-3deg) translateY(-1px); }
+}
+
+@keyframes living-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  95% { transform: scaleY(.1); }
+}
+
 .agent-live {
   position: absolute;
   right: -2px;
@@ -1597,6 +1647,53 @@ button {
   background: rgba(239,68,68,.05) !important;
 }
 
+/* Live Thinking Card: a real, growing timeline of local-runtime's actual
+   embodiment.transition() calls for the in-flight request (see agentLoop.ts
+   + the SSE /live/stream this streams from) -- not a decorative loader. */
+.thinking-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255,255,255,.065);
+  border-radius: 13px;
+  background: rgba(255,255,255,.03);
+  font-size: 11.5px;
+}
+
+.thinking-step {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: rgba(255,255,255,.38);
+  transition: color .3s ease;
+}
+
+.thinking-step.active {
+  color: rgba(255,255,255,.85);
+}
+
+.thinking-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255,255,255,.25);
+}
+
+.thinking-step.active .thinking-dot {
+  background: var(--accent-2, #5ee0ff);
+}
+
+.thinking-dot.pulse {
+  animation: thinking-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes thinking-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(94,224,255,.4); }
+  50% { box-shadow: 0 0 0 5px rgba(94,224,255,0); }
+}
+
 .task-chip {
   display: inline-flex;
   align-items: center;
@@ -1633,6 +1730,66 @@ button {
   border: 1px solid rgba(59,130,246,.12);
   font-size: 8px;
   font-family: monospace;
+  cursor: pointer;
+  transition: .15s ease;
+}
+
+.tool-activity-item:hover {
+  background: rgba(59,130,246,.16);
+}
+
+.tool-activity-item.failed {
+  color: #fca5a5;
+  background: rgba(239,68,68,.08);
+  border-color: rgba(239,68,68,.15);
+}
+
+.tool-detail-card {
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 10px;
+  background: rgba(0,0,0,.25);
+  max-width: 480px;
+}
+
+.tool-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: rgba(255,255,255,.55);
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.tool-detail-code {
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 7px;
+  background: rgba(255,255,255,.03);
+  color: rgba(255,255,255,.72);
+  font-size: 10px;
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool-detail-footer {
+  margin-top: 4px;
+  color: rgba(255,255,255,.5);
+  font-size: 10.5px;
+}
+
+.tool-detail-footer.error {
+  color: #fca5a5;
+}
+
+.tool-detail-link {
+  color: var(--accent-2, #5ee0ff);
+  font-size: 10.5px;
+  word-break: break-all;
 }
 
 .typing {
