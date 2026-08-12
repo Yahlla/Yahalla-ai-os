@@ -68,15 +68,30 @@ where:
 ## Cloud smart tier (opt-in, off by default)
 
 An additional escalation path for heavier reasoning than the local/browser
-models can do, forwarding a chat request to a free-tier OpenAI-compatible
-provider (Groq's `llama-3.3-70b-versatile` by default). Deliberately built
-as its own narrow thing, not folded into local-runtime's `chatCompletion`:
+models can do, and the automatic fallback for any device with no
+local-runtime and no browser WebGPU (iOS Safari, most commonly) -- without
+it, those devices hit the legacy "No AI model is currently online" error
+instead of a working chat. Two providers, both reached through the same
+narrow, server-side path, not folded into local-runtime's `chatCompletion`:
+
+- **Anthropic (real Claude)**, via the official `@anthropic-ai/sdk` --
+  `ANTHROPIC_API_KEY`, model defaults to `claude-opus-5`. This is also the
+  path to running the whole platform with **no local Agent required at
+  all**: set this one key and every device, regardless of what it has
+  installed, gets a real, fully capable AI for chat.
+- **Any OpenAI-compatible provider** (Groq's `llama-3.3-70b-versatile` by
+  default, or a self-hosted vLLM/llama.cpp/Ollama server) -- `CLOUD_TIER_API_KEY`.
+
+`ANTHROPIC_API_KEY` wins when both are set in `platform/.env`
+(`cloudTier.ts`'s `loadCloudTierConfig`); the Settings page lets an admin
+pick either provider explicitly and always overrides the env-var default
+once saved.
 
 - **The upstream API key never leaves this server.** The browser only ever
   calls `POST /smart-tier/chat` on platform-api with the user's own
-  Supabase session token; platform-api holds `CLOUD_TIER_API_KEY` and
-  attaches it server-side. No client-side code path ever sees the key.
-- **Off by default, all the way off.** Leave `CLOUD_TIER_API_KEY` unset in
+  Supabase session token; platform-api holds the provider key and attaches
+  it server-side. No client-side code path ever sees the key.
+- **Off by default, all the way off.** Leave both keys unset in
   `platform/.env` and the route always returns 503 -- there is no
   half-enabled state.
 - **local-runtime is untouched.** `local-runtime/src/llm.ts`'s
@@ -84,22 +99,24 @@ as its own narrow thing, not folded into local-runtime's `chatCompletion`:
   calls anything outside `127.0.0.1` -- this cloud tier is a completely
   separate code path so that invariant stays true.
 - **Portable by construction.** `CLOUD_TIER_URL` / `CLOUD_TIER_MODEL` are
-  the only things that change to point this at a self-hosted,
-  OpenAI-compatible server later (vLLM, llama.cpp's server, Ollama) instead
-  of a free-tier provider -- no code change, just `platform/.env`.
+  the only things that change to point the OpenAI-compatible path at a
+  self-hosted server instead of a free-tier provider -- no code change,
+  just `platform/.env`.
 
-**To enable, no terminal needed:** get a free API key from
-https://console.groq.com, then sign in to the Control Center as the
-platform owner/admin and paste it into **Settings → Cloud Smart Tier**.
-Saved to the `platform_settings` table (RLS-gated to `is_admin()`, see the
-`20260815000000_platform_settings.sql` migration and `api/src/settings.ts`)
-and takes effect on the very next chat message -- no restart, no redeploy.
-The Settings page also shows a live "Connected · &lt;model&gt;" badge the
-moment it's saved.
+**To enable, no terminal needed:** sign in to the Control Center as the
+platform owner/admin, open **Settings → Cloud Smart Tier**, pick Claude or
+an OpenAI-compatible provider, and paste in the key (a real Anthropic key
+from https://console.anthropic.com, or a free Groq key from
+https://console.groq.com). Saved to the `platform_settings` table
+(RLS-gated to `is_admin()`, see the `20260815000000_platform_settings.sql`
+migration and `api/src/settings.ts`) and takes effect on the very next chat
+message -- no restart, no redeploy. The Settings page also shows a live
+"Connected · Claude/OpenAI-compatible · &lt;model&gt;" badge the moment it's
+saved.
 
-`CLOUD_TIER_API_KEY` in `platform/.env` still works as a bootstrap
-default for operators who prefer it, but the database always wins when
-both are set (`cloudTier.ts`'s `resolveCloudTierConfig`).
+`ANTHROPIC_API_KEY` / `CLOUD_TIER_API_KEY` in `platform/.env` still work as
+bootstrap defaults for operators who prefer them, but the database always
+wins when both are set (`cloudTier.ts`'s `resolveCloudTierConfig`).
 
 then `cd platform && docker compose --env-file .env up -d --build`.
 
@@ -137,6 +154,58 @@ proposals and deploys them. Nothing ships silently.
 The first person to ever sign in becomes the platform owner automatically
 (the same `handle_new_user` rule the Supabase-hosted deployment already
 uses) -- no separate admin-creation step.
+
+## Zero-local-agent coding path (`api/src/codingAgent.ts` + `githubCommit.ts`)
+
+For a deployment that wants to run entirely without any local Agent on any
+device: connect a GitHub token at the platform level (**Settings -> GitHub
+Connection**, validated against GitHub before it's stored, never echoed
+back) and a real Claude key (**Settings -> Cloud Smart Tier**, provider
+"Claude"). With both configured, the composer's **Cloud Coding Agent**
+toggle (the branch icon) routes a message to `POST /code/request` instead
+of chat: the server itself explores the real repository (`list_files` /
+`read_file`, via GitHub's Contents API) and, when it's ready, ships the
+change as one atomic commit and opens a real pull request -- all through
+`githubCommit.ts`'s Git Data API pipeline (blob -> tree -> commit -> ref
+update), with **no git binary, no local clone, no working directory on
+disk anywhere**. This is the direct answer to "I don't want any local
+Agent running on any device, make the server itself commit/push to
+GitHub."
+
+- **Still reviewable, never silent.** Opening the PR is the same human
+  checkpoint every other autonomous-coding path in this project uses
+  (`local-runtime`'s `github.open_pr`, the deployment-proposal pipeline) --
+  the agent never merges or pushes straight to `main` on its own.
+- **A follow-up message reuses the same branch/PR** instead of erroring on
+  a duplicate (`commitFilesAndOpenPr` checks for an existing branch ref and
+  an already-open PR from it before creating either).
+- **Bounded.** `runCodingAgent` caps itself at 12 tool-use iterations
+  (explore + commit) so a confused loop can't run away.
+- Real, HTTP-verified tests for both the commit/PR pipeline
+  (`test/githubCommit.test.ts`, against a fake server implementing the
+  actual Git Data API sequence) and the full explore-then-commit loop
+  (`test/codingAgent.test.ts`, fake Anthropic + fake GitHub together).
+
+Proposals get queued one of two ways:
+
+- **"Ship latest main" button** (Deployments page) -- fetches the real
+  latest commit on `main` and proposes it on demand. Always available, no
+  extra setup.
+- **GitHub push webhook** (`POST /webhooks/github`, `api/src/deployments.ts`)
+  -- the permanent, zero-click version: every push to `main` auto-queues a
+  proposal on its own, no admin has to remember to click the button. Set
+  `GITHUB_WEBHOOK_SECRET` in `platform/.env`, then on the repo's GitHub page
+  go to **Settings -> Webhooks -> Add webhook**: Payload URL
+  `https://<your-domain>/webhooks/github`, content type
+  `application/json`, secret = the same value, event = "Just the push
+  event". Approving still always requires one human click either way --
+  this only automates the proposing, never the shipping.
+
+Note: because this webhook route ships as code, a server that predates it
+needs one manual `git pull && docker compose --env-file .env up -d --build`
+(from the same directory `setup-strato.sh` set up) to pick it up in the
+first place -- the one unavoidable exception to "no terminal after setup",
+needed exactly once per feature that upgrades the deploy mechanism itself.
 
 ## Local verification
 

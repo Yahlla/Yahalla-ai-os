@@ -8,7 +8,25 @@ import { withServiceRole, withUserSession } from './db.js'
 // smart tier's key/url/model; the table itself is a plain key/value store
 // so future settings reuse this same mechanism.
 
-const CLOUD_TIER_KEYS = { apiKey: 'cloud_tier_api_key', url: 'cloud_tier_url', model: 'cloud_tier_model' } as const
+const CLOUD_TIER_KEYS = {
+  apiKey: 'cloud_tier_api_key',
+  url: 'cloud_tier_url',
+  model: 'cloud_tier_model',
+  provider: 'cloud_tier_provider',
+} as const
+
+// Platform-level GitHub connection: one token, held server-side, used by
+// the coding agent (codingAgent.ts / githubCommit.ts) to read files and
+// push real branches/commits/PRs directly via the GitHub API -- no local
+// device, no local git clone, no local-runtime involved anywhere. This is
+// the server-side sibling of local-runtime's per-device GitHub connect
+// (task #82): same validate-before-store, never-echo-the-token shape, just
+// scoped to the whole platform instead of one person's own machine.
+const GITHUB_KEYS = {
+  token: 'github_token',
+  username: 'github_username',
+  defaultRepo: 'github_default_repo',
+} as const
 
 async function readSetting(client: pg.PoolClient, key: string): Promise<string | null> {
   const result = await client.query('SELECT value FROM platform_settings WHERE key = $1', [key])
@@ -29,20 +47,27 @@ async function writeSetting(client: pg.PoolClient, key: string, value: string, u
 // non-admin's read silently sees no rows -- reported as "not configured"
 // rather than leaking whether it's actually set.
 
-export async function saveCloudTierSettings(userId: string, settings: { apiKey: string; url?: string; model?: string }): Promise<void> {
+export async function saveCloudTierSettings(
+  userId: string,
+  settings: { apiKey: string; url?: string; model?: string; provider?: 'openai' | 'anthropic' },
+): Promise<void> {
   await withUserSession(userId, async (client) => {
     await writeSetting(client, CLOUD_TIER_KEYS.apiKey, settings.apiKey, userId)
     if (settings.url) await writeSetting(client, CLOUD_TIER_KEYS.url, settings.url, userId)
     if (settings.model) await writeSetting(client, CLOUD_TIER_KEYS.model, settings.model, userId)
+    if (settings.provider) await writeSetting(client, CLOUD_TIER_KEYS.provider, settings.provider, userId)
   })
 }
 
-export async function getCloudTierStatus(userId: string): Promise<{ configured: boolean; model: string | null; url: string | null }> {
+export async function getCloudTierStatus(
+  userId: string,
+): Promise<{ configured: boolean; model: string | null; url: string | null; provider: string | null }> {
   return withUserSession(userId, async (client) => {
     const apiKey = await readSetting(client, CLOUD_TIER_KEYS.apiKey)
     const model = await readSetting(client, CLOUD_TIER_KEYS.model)
     const url = await readSetting(client, CLOUD_TIER_KEYS.url)
-    return { configured: Boolean(apiKey), model, url }
+    const provider = await readSetting(client, CLOUD_TIER_KEYS.provider)
+    return { configured: Boolean(apiKey), model, url, provider }
   })
 }
 
@@ -51,12 +76,51 @@ export async function getCloudTierStatus(userId: string): Promise<{ configured: 
 // platform-wide setting, not the requester's own data, so this
 // deliberately bypasses RLS via withServiceRole (see db.ts) instead of
 // requiring every chatting user to also be an admin.
-export async function readCloudTierSecret(): Promise<{ apiKey: string; url: string | null; model: string | null } | null> {
+export async function readCloudTierSecret(): Promise<
+  { apiKey: string; url: string | null; model: string | null; provider: 'openai' | 'anthropic' | null } | null
+> {
   return withServiceRole(async (client) => {
     const apiKey = await readSetting(client, CLOUD_TIER_KEYS.apiKey)
     if (!apiKey) return null
     const url = await readSetting(client, CLOUD_TIER_KEYS.url)
     const model = await readSetting(client, CLOUD_TIER_KEYS.model)
-    return { apiKey, url, model }
+    const provider = await readSetting(client, CLOUD_TIER_KEYS.provider)
+    return { apiKey, url, model, provider: provider === 'anthropic' ? 'anthropic' : provider === 'openai' ? 'openai' : null }
+  })
+}
+
+export async function saveGithubSettings(userId: string, settings: { token: string; username: string; defaultRepo?: string }): Promise<void> {
+  await withUserSession(userId, async (client) => {
+    await writeSetting(client, GITHUB_KEYS.token, settings.token, userId)
+    await writeSetting(client, GITHUB_KEYS.username, settings.username, userId)
+    if (settings.defaultRepo) await writeSetting(client, GITHUB_KEYS.defaultRepo, settings.defaultRepo, userId)
+  })
+}
+
+export async function getGithubStatus(userId: string): Promise<{ configured: boolean; username: string | null; defaultRepo: string | null }> {
+  return withUserSession(userId, async (client) => {
+    const token = await readSetting(client, GITHUB_KEYS.token)
+    const username = await readSetting(client, GITHUB_KEYS.username)
+    const defaultRepo = await readSetting(client, GITHUB_KEYS.defaultRepo)
+    return { configured: Boolean(token), username: token ? username : null, defaultRepo }
+  })
+}
+
+export async function disconnectGithub(userId: string): Promise<void> {
+  await withUserSession(userId, async (client) => {
+    await client.query('DELETE FROM platform_settings WHERE key = ANY($1)', [[GITHUB_KEYS.token, GITHUB_KEYS.username]])
+  })
+}
+
+// Used internally by the coding-agent routes, which need the actual token
+// regardless of which admin is chatting -- same withServiceRole rationale
+// as readCloudTierSecret above.
+export async function readGithubSecret(): Promise<{ token: string; username: string | null; defaultRepo: string | null } | null> {
+  return withServiceRole(async (client) => {
+    const token = await readSetting(client, GITHUB_KEYS.token)
+    if (!token) return null
+    const username = await readSetting(client, GITHUB_KEYS.username)
+    const defaultRepo = await readSetting(client, GITHUB_KEYS.defaultRepo)
+    return { token, username, defaultRepo }
   })
 }

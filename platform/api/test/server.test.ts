@@ -42,6 +42,14 @@ let fakeUpstream: import('node:http').Server
 let fakeUpstreamPort: number
 let fakeUpstreamBehavior: 'ok' | 'upstream-error' = 'ok'
 
+// A third server instance with the GitHub webhook secret configured --
+// separate from httpServer (which intentionally has none, to prove the
+// endpoint stays disabled without one) the same way cloudTierServer is
+// separate from the plain one above.
+const WEBHOOK_SECRET = 'test-webhook-secret'
+let webhookServer: import('node:http').Server
+let webhookBaseUrl: string
+
 before(async () => {
   process.env.DATABASE_URL = process.env.TEST_DATABASE_URL
   if (!process.env.DATABASE_URL) throw new Error('TEST_DATABASE_URL must be set to run these tests.')
@@ -75,19 +83,27 @@ before(async () => {
     port: 0,
     supabaseJwtSecret: JWT_SECRET,
     allowedOrigins: [],
-    cloudTier: { url: `http://127.0.0.1:${upstreamPort}`, model: 'fake-70b', apiKey: 'fake-key' },
+    cloudTier: { provider: 'openai', url: `http://127.0.0.1:${upstreamPort}`, model: 'fake-70b', apiKey: 'fake-key' },
   })
   cloudTierServer = cloudServer
   await new Promise<void>((resolve) => cloudTierServer.listen(0, '127.0.0.1', () => resolve()))
   const cloudAddress = cloudTierServer.address()
   const cloudPort = typeof cloudAddress === 'object' && cloudAddress ? cloudAddress.port : 0
   cloudTierBaseUrl = `http://127.0.0.1:${cloudPort}`
+
+  const webhookSrv = createPlatformServer({ port: 0, supabaseJwtSecret: JWT_SECRET, allowedOrigins: [], cloudTier: null, githubWebhookSecret: WEBHOOK_SECRET })
+  webhookServer = webhookSrv
+  await new Promise<void>((resolve) => webhookServer.listen(0, '127.0.0.1', () => resolve()))
+  const webhookAddress = webhookServer.address()
+  const webhookPort = typeof webhookAddress === 'object' && webhookAddress ? webhookAddress.port : 0
+  webhookBaseUrl = `http://127.0.0.1:${webhookPort}`
 })
 
 after(async () => {
   httpServer.close()
   cloudTierServer.close()
   fakeUpstream.close()
+  webhookServer.close()
   await closePool()
 })
 
@@ -690,4 +706,359 @@ test('an admin saves a cloud-tier key from the settings API and it works immedia
   assert.equal(chat.status, 200)
   assert.equal(chat.body.content, 'fake 70B reply')
   assert.equal(chat.body.model, 'db-model')
+})
+
+// GitHub push webhook: the permanent replacement for manually clicking
+// "Ship latest main" -- once configured, every push to main auto-creates a
+// pending proposal on its own (still requiring the normal human Approve &
+// Ship click, same as every other proposal). Uses raw fetch (not the api()
+// helper, which always JSON-stringifies) since the signature is computed
+// over the exact raw bytes GitHub would send.
+
+function pushPayload(ref: string): Buffer {
+  return Buffer.from(JSON.stringify({ ref, head_commit: { id: 'sha-webhook', message: 'Webhook-triggered commit' } }))
+}
+
+function signWebhookPayload(payload: Buffer, secret: string): string {
+  return `sha256=${createHmac('sha256', secret).update(payload).digest('hex')}`
+}
+
+async function webhookApi(base: string, body: Buffer, headers: Record<string, string>): Promise<{ status: number; body: any }> {
+  const response = await fetch(`${base}/webhooks/github`, { method: 'POST', body, headers })
+  return { status: response.status, body: (await response.json()) as any }
+}
+
+test('the webhook endpoint is disabled (404) on a server with no secret configured', async () => {
+  const payload = pushPayload('refs/heads/main')
+  const { status } = await webhookApi(baseUrl, payload, {
+    'Content-Type': 'application/json',
+    'X-GitHub-Event': 'push',
+    'X-Hub-Signature-256': signWebhookPayload(payload, 'irrelevant'),
+  })
+  assert.equal(status, 404)
+})
+
+test('a push to main with a valid signature auto-creates a pending proposal, attributed to the webhook not a human', async () => {
+  await withFakeGithub(
+    (req, res) => {
+      if (req.url === '/repos/Yahlla/Yahalla-ai-os/commits/main') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ sha: 'sha-webhook-push', commit: { message: 'Webhook-triggered commit' } }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      const payload = pushPayload('refs/heads/main')
+      const { status, body } = await webhookApi(webhookBaseUrl, payload, {
+        'Content-Type': 'application/json',
+        'X-GitHub-Event': 'push',
+        'X-Hub-Signature-256': signWebhookPayload(payload, WEBHOOK_SECRET),
+      })
+      assert.equal(status, 200)
+      assert.equal(body.success, true)
+      assert.equal(body.outcome, 'proposed')
+      assert.equal(body.deployment.git_ref, 'sha-webhook-push')
+      assert.equal(body.deployment.status, 'pending')
+      assert.equal(body.deployment.proposed_by, null)
+      assert.equal(body.deployment.proposed_by_agent, 'github-webhook')
+    },
+  )
+})
+
+test('a push webhook with an invalid signature is rejected', async () => {
+  const payload = pushPayload('refs/heads/main')
+  const { status, body } = await webhookApi(webhookBaseUrl, payload, {
+    'Content-Type': 'application/json',
+    'X-GitHub-Event': 'push',
+    'X-Hub-Signature-256': signWebhookPayload(payload, 'wrong-secret'),
+  })
+  assert.equal(status, 401)
+  assert.match(body.error, /signature/)
+})
+
+test('a push webhook with no signature header at all is rejected', async () => {
+  const payload = pushPayload('refs/heads/main')
+  const { status } = await webhookApi(webhookBaseUrl, payload, { 'Content-Type': 'application/json', 'X-GitHub-Event': 'push' })
+  assert.equal(status, 401)
+})
+
+test('a push to a branch other than main is ignored, not proposed', async () => {
+  const payload = pushPayload('refs/heads/feature-branch')
+  const { status, body } = await webhookApi(webhookBaseUrl, payload, {
+    'Content-Type': 'application/json',
+    'X-GitHub-Event': 'push',
+    'X-Hub-Signature-256': signWebhookPayload(payload, WEBHOOK_SECRET),
+  })
+  assert.equal(status, 200)
+  assert.equal(body.ignored, true)
+})
+
+// Zero-local-agent coding path: a platform-level GitHub token (Settings ->
+// GitHub Connection) plus a real Anthropic key (Settings -> Cloud Smart
+// Tier) let a human ship a real branch/commit/PR straight from the
+// server, with no local-runtime and no device pairing anywhere in the
+// path. Run against the plain httpServer (starts with neither configured)
+// so these tests also prove the zero-half-configured-state guarantees.
+
+test('GitHub connection starts out not configured', async () => {
+  const { status, body } = await api('/settings/github', {}, humanJwt)
+  assert.equal(status, 200)
+  assert.equal(body.configured, false)
+})
+
+test('/code/request is unavailable until a GitHub token is connected', async () => {
+  const { status, body } = await api('/code/request', { method: 'POST', body: JSON.stringify({ repo: 'acme/widgets', instruction: 'fix it' }) }, humanJwt)
+  assert.equal(status, 503)
+  assert.match(body.error, /GitHub token/)
+})
+
+test('a non-admin cannot connect GitHub at the platform level', async () => {
+  const strangerId = randomUUID()
+  await getPool().query('INSERT INTO auth.users (id, email) VALUES ($1, $2)', [strangerId, 'github-stranger@test.local'])
+  const strangerJwt = signTestJwt(strangerId)
+
+  await withFakeGithub(
+    (req, res) => {
+      if (req.url === '/user') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ login: 'yahalla-bot' }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      const { status, body } = await api('/settings/github', { method: 'POST', body: JSON.stringify({ token: 'ghp_whatever' }) }, strangerJwt)
+      assert.equal(status, 403)
+      assert.match(body.error, /admin/)
+    },
+  )
+})
+
+test('connecting GitHub rejects a token GitHub itself rejects, instead of storing garbage', async () => {
+  await withFakeGithub(
+    (req, res) => {
+      if (req.url === '/user') {
+        res.writeHead(401, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ message: 'Bad credentials' }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      const { status, body } = await api('/settings/github', { method: 'POST', body: JSON.stringify({ token: 'ghp_bad' }) }, humanJwt)
+      assert.equal(status, 400)
+      assert.match(body.error, /rejected this token/)
+    },
+  )
+})
+
+test('an admin connects GitHub with a real token, validated against GitHub itself', async () => {
+  await withFakeGithub(
+    (req, res) => {
+      if (req.url === '/user') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ login: 'yahalla-owner' }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      const save = await api(
+        '/settings/github',
+        { method: 'POST', body: JSON.stringify({ token: 'ghp_real', default_repo: 'acme/widgets' }) },
+        humanJwt,
+      )
+      assert.equal(save.status, 200)
+      assert.equal(save.body.success, true)
+      assert.equal(save.body.username, 'yahalla-owner')
+
+      const status = await api('/settings/github', {}, humanJwt)
+      assert.equal(status.body.configured, true)
+      assert.equal(status.body.username, 'yahalla-owner')
+      assert.equal(status.body.defaultRepo, 'acme/widgets')
+    },
+  )
+})
+
+test('a device cannot request a code change -- only a human', async () => {
+  await withFakeGithub(
+    (req, res) => {
+      if (req.url === '/user') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ login: 'yahalla-owner' }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      await api('/settings/github', { method: 'POST', body: JSON.stringify({ token: 'ghp_real' }) }, humanJwt)
+    },
+  )
+
+  const pairing = await api('/pair_device', { method: 'POST', body: JSON.stringify({ device_name: 'Coding Device' }) }, humanJwt)
+  const exchange = await api('/device_exchange', { method: 'POST', body: JSON.stringify({ code: pairing.body.pairing_code, device_name: 'Coding Device' }) })
+  const freshDeviceToken = exchange.body.token as string
+
+  const { status, body } = await api('/code/request', { method: 'POST', body: JSON.stringify({ repo: 'acme/widgets', instruction: 'fix it' }) }, freshDeviceToken)
+  assert.equal(status, 403)
+  assert.match(body.error, /human/)
+})
+
+test('/code/request is unavailable until a real Claude key is configured, even with GitHub connected', async () => {
+  const { status, body } = await api('/code/request', { method: 'POST', body: JSON.stringify({ repo: 'acme/widgets', instruction: 'fix it' }) }, humanJwt)
+  assert.equal(status, 503)
+  assert.match(body.error, /Claude/)
+})
+
+test('a human ships a real branch/commit/PR from a plain-language instruction, no repo body needed once a default repo is set', async () => {
+  const fakeAnthropic = createFakeHttpServer(async (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(
+      JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-opus-5',
+        content: [
+          {
+            type: 'tool_use',
+            id: 't1',
+            name: 'propose_commit',
+            input: {
+              branch: 'fix-readme',
+              commit_message: 'Fix the README typo',
+              pr_title: 'Fix the README typo',
+              files: [{ path: 'README.md', content: '# Widgets\n' }],
+            },
+          },
+        ],
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+        usage: { input_tokens: 5, output_tokens: 5 },
+      }),
+    )
+  })
+  await new Promise<void>((resolve) => fakeAnthropic.listen(0, '127.0.0.1', () => resolve()))
+  const anthropicAddress = fakeAnthropic.address()
+  const anthropicPort = typeof anthropicAddress === 'object' && anthropicAddress ? anthropicAddress.port : 0
+
+  const codeRequestServer = createPlatformServer({ port: 0, supabaseJwtSecret: JWT_SECRET, allowedOrigins: [], cloudTier: null })
+  await new Promise<void>((resolve) => codeRequestServer.listen(0, '127.0.0.1', () => resolve()))
+  const address = codeRequestServer.address()
+  const port = typeof address === 'object' && address ? address.port : 0
+  const codeRequestBaseUrl = `http://127.0.0.1:${port}`
+  const codeApi = async (path: string, init: RequestInit = {}, token?: string) => {
+    const response = await fetch(`${codeRequestBaseUrl}${path}`, {
+      ...init,
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers },
+    })
+    return { status: response.status, body: (await response.json()) as any }
+  }
+
+  try {
+    await withFakeGithub(
+      (req, res) => {
+        if (req.url === '/user') {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ login: 'yahalla-owner' }))
+          return
+        }
+        if (req.url === '/repos/acme/widgets/git/ref/heads/main' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ object: { sha: 'base-sha' } }))
+          return
+        }
+        if (req.url === '/repos/acme/widgets/git/ref/heads/fix-readme' && req.method === 'GET') {
+          res.writeHead(404)
+          res.end()
+          return
+        }
+        if (req.url === '/repos/acme/widgets/git/refs' && req.method === 'POST') {
+          res.writeHead(201, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({}))
+          return
+        }
+        if (req.url === '/repos/acme/widgets/git/commits/base-sha' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ tree: { sha: 'tree-sha' } }))
+          return
+        }
+        if (req.url === '/repos/acme/widgets/git/blobs' && req.method === 'POST') {
+          res.writeHead(201, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ sha: 'blob-sha' }))
+          return
+        }
+        if (req.url === '/repos/acme/widgets/git/trees' && req.method === 'POST') {
+          res.writeHead(201, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ sha: 'new-tree-sha' }))
+          return
+        }
+        if (req.url === '/repos/acme/widgets/git/commits' && req.method === 'POST') {
+          res.writeHead(201, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ sha: 'new-commit-sha' }))
+          return
+        }
+        if (req.url === '/repos/acme/widgets/git/refs/heads/fix-readme' && req.method === 'PATCH') {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({}))
+          return
+        }
+        if (req.url?.startsWith('/repos/acme/widgets/pulls?head=') && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify([]))
+          return
+        }
+        if (req.url === '/repos/acme/widgets/pulls' && req.method === 'POST') {
+          res.writeHead(201, { 'Content-Type': 'application/json' })
+          res.end(
+            JSON.stringify({
+              number: 123,
+              html_url: 'https://github.com/acme/widgets/pull/123',
+              title: 'Fix the README typo',
+              state: 'open',
+              head: { ref: 'fix-readme' },
+              base: { ref: 'main' },
+            }),
+          )
+          return
+        }
+        res.writeHead(404)
+        res.end()
+      },
+      async () => {
+        const connectGithub = await codeApi(
+          '/settings/github',
+          { method: 'POST', body: JSON.stringify({ token: 'ghp_real', default_repo: 'acme/widgets' }) },
+          humanJwt,
+        )
+        assert.equal(connectGithub.status, 200)
+
+        const saveCloud = await codeApi(
+          '/settings/cloud-tier',
+          {
+            method: 'POST',
+            body: JSON.stringify({ api_key: 'sk-ant-test', provider: 'anthropic', url: `http://127.0.0.1:${anthropicPort}`, model: 'claude-opus-5' }),
+          },
+          humanJwt,
+        )
+        assert.equal(saveCloud.status, 200)
+
+        const { status, body } = await codeApi('/code/request', { method: 'POST', body: JSON.stringify({ instruction: 'Fix the README typo.' }) }, humanJwt)
+        assert.equal(status, 200)
+        assert.equal(body.success, true)
+        assert.equal(body.pull_request.number, 123)
+        assert.equal(body.pull_request.html_url, 'https://github.com/acme/widgets/pull/123')
+        assert.match(body.summary, /Opened pull request #123/)
+      },
+    )
+  } finally {
+    fakeAnthropic.close()
+    codeRequestServer.close()
+  }
 })

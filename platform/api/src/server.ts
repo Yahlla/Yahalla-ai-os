@@ -1,11 +1,19 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { runCodingAgent } from './codingAgent.js'
 import { callCloudTier, resolveCloudTierConfig, type CloudTierConfig } from './cloudTier.js'
-import { getPool, withUserSession } from './db.js'
-import { fetchCompareDiff, fetchLatestMainCommit } from './deployments.js'
+import { getPool, withServiceRole, withUserSession } from './db.js'
+import { proposeLatestDeployment, verifyGithubWebhookSignature } from './deployments.js'
 import { verifyJwt } from './jwt.js'
 import { toVectorLiteral, validateEmbedding } from './memory.js'
 import { authenticateDevice, createPairingCode, ensureHumanUser, exchangePairingCode, recordHeartbeat } from './pairing.js'
-import { getCloudTierStatus, saveCloudTierSettings } from './settings.js'
+import {
+  disconnectGithub,
+  getCloudTierStatus,
+  getGithubStatus,
+  readGithubSecret,
+  saveCloudTierSettings,
+  saveGithubSettings,
+} from './settings.js'
 
 export type PlatformConfig = {
   port: number
@@ -17,20 +25,29 @@ export type PlatformConfig = {
   supabaseUrl?: string
   allowedOrigins: string[]
   cloudTier: CloudTierConfig | null
-  // owner/repo used by POST /deployments/propose_latest to fetch the real
-  // latest-main commit + diff from GitHub's public API. Defaults to this
-  // project's own repo.
+  // owner/repo used by POST /deployments/propose_latest and the push
+  // webhook to fetch the real latest-main commit + diff from GitHub's
+  // public API. Defaults to this project's own repo.
   githubRepo?: string
+  // Secret configured on the GitHub repo's webhook (Settings -> Webhooks).
+  // Required to accept POST /webhooks/github -- without it the endpoint
+  // stays disabled (404) rather than accepting unverifiable requests.
+  githubWebhookSecret?: string
 }
 
 type Identity = { userId: string; kind: 'human' | 'device' }
 
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readRawBody(req: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = []
   for await (const chunk of req) chunks.push(chunk as Buffer)
-  if (chunks.length === 0) return {}
+  return Buffer.concat(chunks)
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const raw = await readRawBody(req)
+  if (raw.length === 0) return {}
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    return JSON.parse(raw.toString('utf8'))
   } catch {
     return {}
   }
@@ -106,6 +123,48 @@ export function createPlatformServer(config: PlatformConfig) {
           String(body.platform ?? 'other'),
         )
         return send(res, 200, { success: true, device_id: result.deviceId, device_name: result.deviceName, token: result.token })
+      }
+
+      // GitHub calls this directly on every push -- it has no Supabase JWT
+      // or device pairing token, so it can't go through resolveIdentity like
+      // every other route below. Its only credential is the HMAC signature
+      // GitHub computes over the raw body with the shared webhook secret
+      // (verifyGithubWebhookSignature), which is why the body must be read
+      // as raw bytes here rather than via readJsonBody. This is the
+      // permanent replacement for manually clicking "Ship latest main":
+      // every push to main now queues a pending proposal on its own: a
+      // human still has to click Approve & Ship, same as any other
+      // proposal, so nothing reaches live production without that click.
+      if (path === '/webhooks/github' && req.method === 'POST') {
+        if (!config.githubWebhookSecret) {
+          return send(res, 404, { success: false, error: 'GitHub webhook not configured on this deployment.' })
+        }
+        const raw = await readRawBody(req)
+        const signature = req.headers['x-hub-signature-256']
+        if (!verifyGithubWebhookSignature(raw, typeof signature === 'string' ? signature : undefined, config.githubWebhookSecret)) {
+          return send(res, 401, { success: false, error: 'Invalid webhook signature.' })
+        }
+
+        const event = req.headers['x-github-event']
+        let payload: { ref?: string }
+        try {
+          payload = JSON.parse(raw.toString('utf8'))
+        } catch {
+          return send(res, 400, { success: false, error: 'Invalid JSON payload.' })
+        }
+
+        if (event !== 'push' || payload.ref !== 'refs/heads/main') {
+          return send(res, 200, { success: true, ignored: true })
+        }
+
+        const githubRepo = config.githubRepo ?? 'Yahlla/Yahalla-ai-os'
+        const result = await withServiceRole((client) =>
+          proposeLatestDeployment(githubRepo, (text, params) => client.query(text, params), null, 'github-webhook'),
+        )
+        if (result.outcome === 'github_unreachable') {
+          return send(res, 502, { success: false, error: `Could not reach GitHub to check the latest commit on ${result.repo}.` })
+        }
+        return send(res, 200, { success: true, ...result })
       }
 
       const identity = await resolveIdentity(req, config)
@@ -295,35 +354,16 @@ export function createPlatformServer(config: PlatformConfig) {
         if (identity.kind !== 'human') return send(res, 403, { success: false, error: 'Only a human can propose a deployment.' })
 
         const githubRepo = config.githubRepo ?? 'Yahlla/Yahalla-ai-os'
-        const latest = await fetchLatestMainCommit(githubRepo)
-        if (!latest) return send(res, 502, { success: false, error: `Could not reach GitHub to check the latest commit on ${githubRepo}.` })
-
-        const priorDeployed = await withUserSession(identity.userId, (client) =>
-          client.query("SELECT git_ref FROM deployment_proposals WHERE status = 'deployed' ORDER BY deployed_at DESC LIMIT 1"),
+        const result = await withUserSession(identity.userId, (client) =>
+          proposeLatestDeployment(githubRepo, (text, params) => client.query(text, params), identity.userId, null),
         )
-        const baseRef = priorDeployed.rows[0]?.git_ref as string | undefined
-
-        if (baseRef === latest.sha) {
+        if (result.outcome === 'github_unreachable') {
+          return send(res, 502, { success: false, error: `Could not reach GitHub to check the latest commit on ${result.repo}.` })
+        }
+        if (result.outcome === 'up_to_date') {
           return send(res, 200, { success: true, up_to_date: true, message: 'Already up to date -- the last deployment already shipped this exact commit.' })
         }
-
-        const diff = baseRef ? await fetchCompareDiff(githubRepo, baseRef, latest.sha) : null
-
-        const created = await withUserSession(identity.userId, (client) =>
-          client.query(
-            `INSERT INTO deployment_proposals (title, description, git_ref, base_ref, diff, proposed_by)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-            [
-              `Ship latest main (${latest.sha.slice(0, 7)})`,
-              latest.message.slice(0, 500),
-              latest.sha,
-              baseRef ?? latest.sha,
-              diff ?? `No prior deployment on record to diff against -- this proposal ships commit ${latest.sha} on main.\n\n${latest.message}`,
-              identity.userId,
-            ],
-          ),
-        )
-        return send(res, 200, { success: true, deployment: created.rows[0] })
+        return send(res, 200, { success: true, deployment: result.deployment })
       }
 
       const deploymentMatch = path.match(/^\/deployments\/([^/]+)\/decide$/)
@@ -538,11 +578,13 @@ export function createPlatformServer(config: PlatformConfig) {
         const body = await readJsonBody(req)
         const apiKey = typeof body.api_key === 'string' ? body.api_key.trim() : ''
         if (!apiKey) return send(res, 400, { success: false, error: 'api_key is required.' })
+        const provider = body.provider === 'anthropic' ? 'anthropic' : body.provider === 'openai' ? 'openai' : undefined
         try {
           await saveCloudTierSettings(identity.userId, {
             apiKey,
             url: typeof body.url === 'string' && body.url.trim() ? body.url.trim() : undefined,
             model: typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined,
+            provider,
           })
         } catch (error) {
           const code = (error as { code?: string } | null)?.code
@@ -552,6 +594,98 @@ export function createPlatformServer(config: PlatformConfig) {
           throw error
         }
         return send(res, 200, { success: true })
+      }
+
+      // Platform-level GitHub connection: one token, held server-side, used
+      // by the coding agent below to read/commit real files directly via
+      // the GitHub API -- no local device involved anywhere. Same
+      // validate-before-store, never-echo-the-token shape as
+      // local-runtime's per-device GitHub connect (task #82), just scoped
+      // to the whole platform via platform_settings instead of one
+      // person's SQLite file.
+      if (path === '/settings/github' && req.method === 'GET') {
+        const status = await getGithubStatus(identity.userId)
+        return send(res, 200, status)
+      }
+
+      if (path === '/settings/github' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const token = typeof body.token === 'string' ? body.token.trim() : ''
+        if (!token) return send(res, 400, { success: false, error: 'A GitHub Personal Access Token is required.' })
+        const githubApiBase = process.env.GITHUB_API_BASE_URL ?? 'https://api.github.com'
+        let username: string | null = null
+        try {
+          const response = await fetch(`${githubApiBase}/user`, {
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'yahalla-ai-os-platform-api' },
+          })
+          if (!response.ok) {
+            return send(res, 400, {
+              success: false,
+              error: response.status === 401 ? 'GitHub rejected this token -- check it was copied correctly and has not expired.' : `GitHub API returned HTTP ${response.status}.`,
+            })
+          }
+          const user = (await response.json()) as { login?: string }
+          username = user.login ?? null
+        } catch (error) {
+          return send(res, 502, { success: false, error: error instanceof Error ? error.message : 'Could not reach GitHub to validate the token.' })
+        }
+        try {
+          await saveGithubSettings(identity.userId, {
+            token,
+            username: username ?? '',
+            defaultRepo: typeof body.default_repo === 'string' && body.default_repo.trim() ? body.default_repo.trim() : undefined,
+          })
+        } catch (error) {
+          const code = (error as { code?: string } | null)?.code
+          if (code === '42501') return send(res, 403, { success: false, error: 'Only an admin can change platform settings.' })
+          throw error
+        }
+        return send(res, 200, { success: true, username })
+      }
+
+      if (path === '/settings/github' && req.method === 'DELETE') {
+        try {
+          await disconnectGithub(identity.userId)
+        } catch (error) {
+          const code = (error as { code?: string } | null)?.code
+          if (code === '42501') return send(res, 403, { success: false, error: 'Only an admin can change platform settings.' })
+          throw error
+        }
+        return send(res, 200, { success: true })
+      }
+
+      // The zero-local-agent coding path: a human describes a change, this
+      // server explores the real repo and commits a real branch/PR itself
+      // via githubCommit.ts + codingAgent.ts -- entirely over the GitHub
+      // API, no local-runtime, no local git clone, no device pairing.
+      // Needs both a platform GitHub token (above) and a real Anthropic
+      // key configured as the cloud tier's provider (tool-use coding needs
+      // Claude specifically, independent of which provider answers plain
+      // chat messages).
+      if (path === '/code/request' && req.method === 'POST') {
+        if (identity.kind !== 'human') return send(res, 403, { success: false, error: 'Only a human can request a code change.' })
+        const github = await readGithubSecret()
+        if (!github) {
+          return send(res, 503, { success: false, error: 'No GitHub token configured. Add one in Settings -> GitHub Connection.' })
+        }
+        const cloud = await resolveCloudTierConfig(config.cloudTier)
+        if (!cloud || cloud.provider !== 'anthropic') {
+          return send(res, 503, { success: false, error: 'The coding agent needs a real Claude key configured in Settings -> Cloud Smart Tier (pick "Claude").' })
+        }
+        const body = await readJsonBody(req)
+        const repoInput = typeof body.repo === 'string' ? body.repo.trim() : github.defaultRepo ?? ''
+        const [owner, repo] = repoInput.split('/')
+        const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : ''
+        if (!owner || !repo) return send(res, 400, { success: false, error: 'repo is required, as "owner/name" (or set a default repo in Settings).' })
+        if (!instruction) return send(res, 400, { success: false, error: 'instruction is required.' })
+
+        const result = await runCodingAgent(
+          { apiKey: cloud.apiKey, model: cloud.model, baseURL: cloud.url },
+          { token: github.token },
+          { owner, repo, base: typeof body.base === 'string' && body.base.trim() ? body.base.trim() : undefined, instruction },
+        )
+        if (!result.ok) return send(res, 502, { success: false, error: result.error })
+        return send(res, 200, { success: true, summary: result.summary, pull_request: result.pullRequest })
       }
 
       send(res, 404, { success: false, error: `No route for ${req.method} ${path}` })

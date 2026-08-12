@@ -106,18 +106,23 @@ export async function cloudTierChat(messages: { role: string; content: string }[
 // to the database (platform_settings, RLS-gated to admins) from the
 // Control Center's Settings page instead of editing platform/.env by
 // hand. Takes effect on the very next chat message, no redeploy.
-export type CloudTierStatus = { configured: boolean; model: string | null; url: string | null }
+export type CloudTierStatus = { configured: boolean; model: string | null; url: string | null; provider: 'openai' | 'anthropic' | null }
 
 export async function getCloudTierStatus(): Promise<CloudTierStatus> {
   const res = await platformFetch('/settings/cloud-tier')
-  if (!res?.ok) return { configured: false, model: null, url: null }
+  if (!res?.ok) return { configured: false, model: null, url: null, provider: null }
   return (await res.json()) as CloudTierStatus
 }
 
-export async function saveCloudTierSettings(settings: { apiKey: string; url?: string; model?: string }): Promise<{ ok: true } | { ok: false; error: string }> {
+export async function saveCloudTierSettings(settings: {
+  apiKey: string
+  url?: string
+  model?: string
+  provider?: 'openai' | 'anthropic'
+}): Promise<{ ok: true } | { ok: false; error: string }> {
   const res = await platformFetch('/settings/cloud-tier', {
     method: 'POST',
-    body: JSON.stringify({ api_key: settings.apiKey, url: settings.url, model: settings.model }),
+    body: JSON.stringify({ api_key: settings.apiKey, url: settings.url, model: settings.model, provider: settings.provider }),
   })
   if (!res) return { ok: false, error: 'Platform server is not configured.' }
   const data = (await res.json()) as { success?: boolean; error?: string }
@@ -169,6 +174,48 @@ export async function getTask(taskId: string): Promise<PlatformTask | null> {
   if (!res?.ok) return null
   const data = (await res.json()) as { success?: boolean; task?: PlatformTask }
   return data.task ?? null
+}
+
+// Zero-local-agent coding path (platform/api/src/codingAgent.ts +
+// githubCommit.ts): a platform-level GitHub token, held server-side, lets
+// this server itself read real repo files and commit a real branch/PR
+// directly via the GitHub API -- no device pairing, no local-runtime,
+// no local git clone, anywhere in the path.
+
+export type GithubConnectionStatus = { configured: boolean; username: string | null; defaultRepo: string | null }
+
+export async function getGithubConnectionStatus(): Promise<GithubConnectionStatus> {
+  const res = await platformFetch('/settings/github')
+  if (!res?.ok) return { configured: false, username: null, defaultRepo: null }
+  return (await res.json()) as GithubConnectionStatus
+}
+
+export async function connectPlatformGithub(token: string, defaultRepo?: string): Promise<{ ok: true; username: string | null } | { ok: false; error: string }> {
+  const res = await platformFetch('/settings/github', { method: 'POST', body: JSON.stringify({ token, default_repo: defaultRepo }) })
+  if (!res) return { ok: false, error: 'Platform server is not configured.' }
+  const data = (await res.json()) as { success?: boolean; username?: string | null; error?: string }
+  if (!res.ok || !data.success) return { ok: false, error: data.error ?? `Connect failed (HTTP ${res.status}).` }
+  return { ok: true, username: data.username ?? null }
+}
+
+export async function disconnectPlatformGithub(): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await platformFetch('/settings/github', { method: 'DELETE' })
+  if (!res) return { ok: false, error: 'Platform server is not configured.' }
+  const data = (await res.json()) as { success?: boolean; error?: string }
+  if (!res.ok || !data.success) return { ok: false, error: data.error ?? `Disconnect failed (HTTP ${res.status}).` }
+  return { ok: true }
+}
+
+export type CodeChangePullRequest = { number: number; html_url: string; title: string; state: string; head: string; base: string }
+
+export type CodeRequestResult = { ok: true; summary: string; pullRequest: CodeChangePullRequest | null } | { ok: false; error: string }
+
+export async function requestCodeChange(instruction: string, repo?: string, base?: string): Promise<CodeRequestResult> {
+  const res = await platformFetch('/code/request', { method: 'POST', body: JSON.stringify({ instruction, repo, base }) })
+  if (!res) return { ok: false, error: 'Platform server is not configured.' }
+  const data = (await res.json()) as { success?: boolean; summary?: string; pull_request?: CodeChangePullRequest | null; error?: string }
+  if (!res.ok || !data.success) return { ok: false, error: data.error ?? `Code request failed (HTTP ${res.status}).` }
+  return { ok: true, summary: data.summary ?? 'Done.', pullRequest: data.pull_request ?? null }
 }
 
 // Deployments (self-evolving agent path + the zero-terminal "ship the

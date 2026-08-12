@@ -11,9 +11,10 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/test/server.test.js dist/test/jwt.test.js"
+    "test": "node --test dist/test/server.test.js dist/test/jwt.test.js dist/test/cloudTier.test.js dist/test/githubCommit.test.js dist/test/codingAgent.test.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
     "pg": "^8.13.1"
   },
   "devDependencies": {

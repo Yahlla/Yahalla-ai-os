@@ -64,14 +64,33 @@ services:
       # measured, not guessed).
       DB_POOL_MAX: ${PLATFORM_API_DB_POOL_MAX:-8}
       # Opt-in cloud smart tier (see api/src/cloudTier.ts): off by default.
-      # Leave CLOUD_TIER_API_KEY unset in .env and this whole feature does
-      # not exist -- no route, no outbound calls, nothing to disable later.
-      # Set it to a free-tier key (Groq by default) to turn it on; swap
-      # CLOUD_TIER_URL/MODEL to point at your own OpenAI-compatible server
-      # later without any code change.
+      # Leave both keys below unset in .env and this whole feature does not
+      # exist -- no route, no outbound calls, nothing to disable later.
+      # ANTHROPIC_API_KEY (real Claude, via the official Anthropic SDK)
+      # takes precedence over CLOUD_TIER_API_KEY (any OpenAI-compatible
+      # provider, Groq by default) when both are set. This is what powers
+      # chat for any device with no local-runtime and no browser WebGPU
+      # (e.g. iOS Safari) -- set this one key and every such user gets a
+      # real, working AI instead of "Cloud smart tier is not reachable".
+      # Everything here is also editable with no restart from the Control
+      # Center's Settings page once an admin has signed in.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
       CLOUD_TIER_API_KEY: ${CLOUD_TIER_API_KEY:-}
       CLOUD_TIER_URL: ${CLOUD_TIER_URL:-https://api.groq.com/openai/v1}
       CLOUD_TIER_MODEL: ${CLOUD_TIER_MODEL:-llama-3.3-70b-versatile}
+      # owner/repo backing both the "Ship latest main" button and the push
+      # webhook below (api/src/deployments.ts) -- defaults to this project's
+      # own repo, only needs setting for a fork.
+      GITHUB_REPO: ${GITHUB_REPO:-Yahlla/Yahalla-ai-os}
+      # Set this and add a webhook on the GitHub repo (Settings -> Webhooks
+      # -> Add webhook -> Payload URL: https://<your-domain>/webhooks/github,
+      # content type application/json, same secret, "Just the push event")
+      # to auto-queue a deployment proposal on every push to main -- the
+      # permanent replacement for clicking "Ship latest main" by hand.
+      # Leave unset and the endpoint stays disabled (404); the button keeps
+      # working manually either way.
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
     mem_limit: 256m
     cpus: 0.5
 
