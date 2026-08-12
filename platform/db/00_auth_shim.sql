@@ -35,10 +35,18 @@ DO $$ BEGIN CREATE ROLE service_role NOLOGIN BYPASSRLS; EXCEPTION WHEN duplicate
 -- unmodified. NOLOGIN: nothing should ever authenticate as it directly.
 DO $$ BEGIN CREATE ROLE "postgres" NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
-GRANT SELECT ON auth.users TO anon, authenticated, service_role;
+-- "postgres" (see above) owns most functions in the ported migrations,
+-- including SECURITY DEFINER ones like is_admin() that call auth.uid()
+-- internally -- SECURITY DEFINER runs the function body as its owning
+-- role, so that role needs its own USAGE grant on the auth schema too,
+-- not just the roles that call the function from the outside. Without
+-- this, every admin-gated route fails with "permission denied for schema
+-- auth" even for a real owner/admin user, because is_admin() itself can't
+-- resolve auth.uid() while executing as "postgres".
+GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role, "postgres";
+GRANT SELECT ON auth.users TO anon, authenticated, service_role, "postgres";
 GRANT INSERT, UPDATE, DELETE ON auth.users TO service_role;
-GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role, "postgres";
 
 -- In real Supabase, service_role's full table access is provisioned by
 -- the platform itself, outside any migration file -- BYPASSRLS bypasses
