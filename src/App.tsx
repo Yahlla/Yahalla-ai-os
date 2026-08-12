@@ -954,30 +954,55 @@ function DiffView({ diff }: { diff: string }) {
   )
 }
 
-function DeploymentsSection({ profile }: { profile: Profile }) {
+function DeploymentsSection(_props: { profile: Profile }) {
   const [deployments, setDeployments] = useState<DeploymentProposal[]>([])
   const [loading, setLoading] = useState(true)
   const [processing, setProcessing] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [proposing, setProposing] = useState(false)
+  const [proposeMessage, setProposeMessage] = useState('')
+  const [error, setError] = useState('')
+
+  function load() {
+    setLoading(true)
+    platformApi.listDeployments().then(setDeployments).finally(() => setLoading(false))
+  }
 
   useEffect(() => {
-    api.getDeploymentProposals().then(setDeployments).finally(() => setLoading(false))
+    load()
   }, [])
 
   async function handleAction(deployment: DeploymentProposal, action: 'approve' | 'reject') {
     setProcessing(deployment.id)
-    try {
-      await api.decideDeploymentProposal(deployment.id, action, profile.id)
-      setDeployments((prev) =>
-        prev.map((d) =>
-          d.id === deployment.id ? { ...d, status: action === 'approve' ? 'approved' : 'rejected' } : d,
-        ),
-      )
-    } catch (err) {
-      console.error(err)
-    } finally {
-      setProcessing(null)
+    setError('')
+    const result = await platformApi.decideDeployment(deployment.id, action)
+    setProcessing(null)
+    if (!result.ok) {
+      setError(result.error)
+      return
     }
+    setDeployments((prev) =>
+      prev.map((d) =>
+        d.id === deployment.id ? { ...d, status: action === 'approve' ? 'approved' : 'rejected' } : d,
+      ),
+    )
+  }
+
+  async function handleProposeLatest() {
+    setProposing(true)
+    setError('')
+    setProposeMessage('')
+    const result = await platformApi.proposeLatestDeployment()
+    setProposing(false)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    if (result.upToDate) {
+      setProposeMessage('Already up to date -- the last deployment already shipped the latest commit on main.')
+      return
+    }
+    load()
   }
 
   if (loading) return <div className="loading-text">Loading deployments…</div>
@@ -990,6 +1015,17 @@ function DeploymentsSection({ profile }: { profile: Profile }) {
         <h2>Deployments</h2>
         <p>{pendingCount} awaiting review · agent-proposed changes ship only after one-click approval, no terminal required</p>
       </div>
+
+      {platformApi.isPlatformApiConfigured() && (
+        <div className="data-card-actions" style={{ marginBottom: 20 }}>
+          <button className="mini-button approve" disabled={proposing} onClick={handleProposeLatest}>
+            <GitBranch size={14} /> {proposing ? 'Checking main…' : 'Ship latest main'}
+          </button>
+        </div>
+      )}
+      {proposeMessage && <p className="data-card-desc">{proposeMessage}</p>}
+      {error && <p className="data-card-desc" style={{ color: '#fca5a5' }}>{error}</p>}
+
       <div className="card-grid deployments-grid">
         {deployments.length === 0 && <p className="empty-state">No deployment proposals yet.</p>}
         {deployments.map((deployment) => (

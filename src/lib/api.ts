@@ -15,7 +15,6 @@ import type {
   ChatResponse,
   Device,
   PairDeviceResponse,
-  DeploymentProposal,
 } from './types'
 
 const YAHALLA_AI_FUNCTION = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/yahalla-ai`
@@ -210,38 +209,6 @@ export async function approveToolExecution(
   }
 
   return result as ChatResponse
-}
-
-export async function getDeploymentProposals(): Promise<DeploymentProposal[]> {
-  const { data, error } = await supabase
-    .from('deployment_proposals')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(50)
-  if (error) throw error
-  return (data ?? []) as DeploymentProposal[]
-}
-
-// One-click ship: an agent already opened this as a reviewable proposal
-// (title/diff/git_ref); approving here is the entire "deploy" action a
-// human takes -- deploy-agent picks up status = 'approved' rows and does
-// the actual git pull + docker compose up on the VPS. Nothing ships from
-// just writing code; this update is the only door.
-export async function decideDeploymentProposal(
-  id: string,
-  decision: 'approve' | 'reject',
-  decidedBy: string,
-): Promise<void> {
-  const { error } = await supabase
-    .from('deployment_proposals')
-    .update({
-      status: decision === 'approve' ? 'approved' : 'rejected',
-      decided_by: decidedBy,
-      decided_at: new Date().toISOString(),
-    })
-    .eq('id', id)
-    .eq('status', 'pending')
-  if (error) throw error
 }
 
 export async function getDevices(): Promise<Device[]> {

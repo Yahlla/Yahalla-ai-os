@@ -1,4 +1,4 @@
-import type { Device } from './types'
+import type { Device, DeploymentProposal } from './types'
 import { supabase } from './supabase'
 
 // Optional: the self-hosted Strato control plane (platform/api). Chat
@@ -169,4 +169,37 @@ export async function getTask(taskId: string): Promise<PlatformTask | null> {
   if (!res?.ok) return null
   const data = (await res.json()) as { success?: boolean; task?: PlatformTask }
   return data.task ?? null
+}
+
+// Deployments (self-evolving agent path + the zero-terminal "ship the
+// latest code" button): these read/write platform-api's own self-hosted
+// deployment_proposals table -- the exact one deploy-agent's worker polls
+// for approved rows before running `git pull && docker compose up -d
+// --build` on the VPS. Deliberately NOT the Supabase-backed functions in
+// api.ts, which write to a different database deploy-agent never looks at.
+export async function listDeployments(): Promise<DeploymentProposal[]> {
+  const res = await platformFetch('/deployments')
+  if (!res?.ok) return []
+  const data = (await res.json()) as { deployments?: DeploymentProposal[] }
+  return data.deployments ?? []
+}
+
+export async function proposeLatestDeployment(): Promise<
+  { ok: true; upToDate: true } | { ok: true; upToDate: false; deployment: DeploymentProposal } | { ok: false; error: string }
+> {
+  const res = await platformFetch('/deployments/propose_latest', { method: 'POST' })
+  if (!res) return { ok: false, error: 'Platform server is not configured.' }
+  const data = (await res.json()) as { success?: boolean; up_to_date?: boolean; message?: string; deployment?: DeploymentProposal; error?: string }
+  if (!res.ok || !data.success) return { ok: false, error: data.error ?? `Failed (HTTP ${res.status}).` }
+  if (data.up_to_date) return { ok: true, upToDate: true }
+  if (!data.deployment) return { ok: false, error: 'Server did not return a deployment proposal.' }
+  return { ok: true, upToDate: false, deployment: data.deployment }
+}
+
+export async function decideDeployment(id: string, decision: 'approve' | 'reject'): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await platformFetch(`/deployments/${id}/decide`, { method: 'POST', body: JSON.stringify({ decision }) })
+  if (!res) return { ok: false, error: 'Platform server is not configured.' }
+  const data = (await res.json()) as { success?: boolean; error?: string }
+  if (!res.ok) return { ok: false, error: data.error ?? `Failed (HTTP ${res.status}).` }
+  return { ok: true }
 }

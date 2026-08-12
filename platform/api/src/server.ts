@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { callCloudTier, resolveCloudTierConfig, type CloudTierConfig } from './cloudTier.js'
 import { getPool, withUserSession } from './db.js'
+import { fetchCompareDiff, fetchLatestMainCommit } from './deployments.js'
 import { verifyJwt } from './jwt.js'
 import { toVectorLiteral, validateEmbedding } from './memory.js'
 import { authenticateDevice, createPairingCode, ensureHumanUser, exchangePairingCode, recordHeartbeat } from './pairing.js'
@@ -16,6 +17,10 @@ export type PlatformConfig = {
   supabaseUrl?: string
   allowedOrigins: string[]
   cloudTier: CloudTierConfig | null
+  // owner/repo used by POST /deployments/propose_latest to fetch the real
+  // latest-main commit + diff from GitHub's public API. Defaults to this
+  // project's own repo.
+  githubRepo?: string
 }
 
 type Identity = { userId: string; kind: 'human' | 'device' }
@@ -274,6 +279,47 @@ export function createPlatformServer(config: PlatformConfig) {
               diff,
               identity.userId,
               typeof body.proposed_by_agent === 'string' ? body.proposed_by_agent : null,
+            ],
+          ),
+        )
+        return send(res, 200, { success: true, deployment: created.rows[0] })
+      }
+
+      // Zero-terminal "ship the latest code" button: no human has to know
+      // git or construct a diff by hand. Fetches the real latest commit on
+      // main and a real diff against whatever was last actually deployed
+      // (both from GitHub's public API, server-side so there's no CORS
+      // concern) and proposes it -- still requires the normal Approve &
+      // Ship click below before deploy-agent picks it up.
+      if (path === '/deployments/propose_latest' && req.method === 'POST') {
+        if (identity.kind !== 'human') return send(res, 403, { success: false, error: 'Only a human can propose a deployment.' })
+
+        const githubRepo = config.githubRepo ?? 'Yahlla/Yahalla-ai-os'
+        const latest = await fetchLatestMainCommit(githubRepo)
+        if (!latest) return send(res, 502, { success: false, error: `Could not reach GitHub to check the latest commit on ${githubRepo}.` })
+
+        const priorDeployed = await withUserSession(identity.userId, (client) =>
+          client.query("SELECT git_ref FROM deployment_proposals WHERE status = 'deployed' ORDER BY deployed_at DESC LIMIT 1"),
+        )
+        const baseRef = priorDeployed.rows[0]?.git_ref as string | undefined
+
+        if (baseRef === latest.sha) {
+          return send(res, 200, { success: true, up_to_date: true, message: 'Already up to date -- the last deployment already shipped this exact commit.' })
+        }
+
+        const diff = baseRef ? await fetchCompareDiff(githubRepo, baseRef, latest.sha) : null
+
+        const created = await withUserSession(identity.userId, (client) =>
+          client.query(
+            `INSERT INTO deployment_proposals (title, description, git_ref, base_ref, diff, proposed_by)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+            [
+              `Ship latest main (${latest.sha.slice(0, 7)})`,
+              latest.message.slice(0, 500),
+              latest.sha,
+              baseRef ?? latest.sha,
+              diff ?? `No prior deployment on record to diff against -- this proposal ships commit ${latest.sha} on main.\n\n${latest.message}`,
+              identity.userId,
             ],
           ),
         )

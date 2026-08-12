@@ -7,6 +7,7 @@ const supabaseJwtSecret = process.env.SUPABASE_JWT_SECRET || undefined
 const supabaseUrl = process.env.SUPABASE_URL || undefined
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
 const cloudTier = loadCloudTierConfig(process.env)
+const githubRepo = process.env.GITHUB_REPO || 'Yahlla/Yahalla-ai-os'
 
 // Supabase projects sign tokens with HS256 (needs SUPABASE_JWT_SECRET) or
 // ES256 (needs SUPABASE_URL, to fetch the project's public JWKS) -- see
@@ -26,7 +27,7 @@ if (cloudTier) {
   console.log('[platform-api] cloud smart tier disabled (CLOUD_TIER_API_KEY not set)')
 }
 
-const server = createPlatformServer({ port, supabaseJwtSecret, supabaseUrl, allowedOrigins, cloudTier })
+const server = createPlatformServer({ port, supabaseJwtSecret, supabaseUrl, allowedOrigins, cloudTier, githubRepo })
 
 server.listen(port, () => {
   console.log(`[platform-api] listening on :${port}`)

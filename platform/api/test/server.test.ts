@@ -336,6 +336,135 @@ test('the same proposal cannot be decided twice', async () => {
   assert.ok(body.error)
 })
 
+// The server under test (created in before(), above) was constructed
+// without a custom githubRepo, so it falls back to the project's own
+// default ('Yahlla/Yahalla-ai-os') -- the fake GitHub server below has to
+// answer for that exact repo path to be reached at all.
+async function withFakeGithub(
+  handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void,
+  run: () => Promise<void>,
+): Promise<void> {
+  const fakeGithub = createFakeHttpServer(handler)
+  await new Promise<void>((resolve) => fakeGithub.listen(0, '127.0.0.1', () => resolve()))
+  const address = fakeGithub.address()
+  const port = typeof address === 'object' && address ? address.port : 0
+  const previous = process.env.GITHUB_API_BASE_URL
+  process.env.GITHUB_API_BASE_URL = `http://127.0.0.1:${port}`
+  try {
+    await run()
+  } finally {
+    if (previous === undefined) delete process.env.GITHUB_API_BASE_URL
+    else process.env.GITHUB_API_BASE_URL = previous
+    fakeGithub.close()
+  }
+}
+
+test('propose_latest fetches the real latest commit from GitHub and proposes it (no prior deployment to diff against yet)', async () => {
+  await withFakeGithub(
+    (req, res) => {
+      if (req.url === '/repos/Yahlla/Yahalla-ai-os/commits/main') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ sha: 'abc123deadbeef0000000000000000000000000', commit: { message: 'Fix the thing' } }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      const { status, body } = await api('/deployments/propose_latest', { method: 'POST' }, humanJwt)
+      assert.equal(status, 200)
+      assert.equal(body.success, true)
+      assert.equal(body.deployment.git_ref, 'abc123deadbeef0000000000000000000000000')
+      assert.match(body.deployment.title, /abc123d/)
+      assert.equal(body.deployment.description, 'Fix the thing')
+      assert.match(body.deployment.diff, /No prior deployment on record/)
+      assert.equal(body.deployment.status, 'pending')
+    },
+  )
+})
+
+test('propose_latest fetches a real diff against the last deployed commit when one exists', async () => {
+  await getPool().query(
+    "INSERT INTO deployment_proposals (title, git_ref, base_ref, diff, status, proposed_by, deployed_at) VALUES ('prior', 'sha-old', 'main', 'x', 'deployed', $1, now())",
+    [humanUserId],
+  )
+
+  await withFakeGithub(
+    (req, res) => {
+      if (req.url === '/repos/Yahlla/Yahalla-ai-os/commits/main') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ sha: 'sha-new', commit: { message: 'Second commit' } }))
+        return
+      }
+      if (req.url === '/repos/Yahlla/Yahalla-ai-os/compare/sha-old...sha-new') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' })
+        res.end('--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new\n')
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      const { status, body } = await api('/deployments/propose_latest', { method: 'POST' }, humanJwt)
+      assert.equal(status, 200)
+      assert.equal(body.deployment.base_ref, 'sha-old')
+      assert.equal(body.deployment.git_ref, 'sha-new')
+      assert.match(body.deployment.diff, /-old\n\+new/)
+    },
+  )
+})
+
+test('propose_latest reports up-to-date instead of a pointless duplicate proposal', async () => {
+  await getPool().query(
+    "INSERT INTO deployment_proposals (title, git_ref, base_ref, diff, status, proposed_by, deployed_at) VALUES ('prior2', 'sha-current', 'main', 'x', 'deployed', $1, now())",
+    [humanUserId],
+  )
+
+  await withFakeGithub(
+    (req, res) => {
+      if (req.url === '/repos/Yahlla/Yahalla-ai-os/commits/main') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ sha: 'sha-current', commit: { message: 'Nothing new' } }))
+        return
+      }
+      res.writeHead(404)
+      res.end()
+    },
+    async () => {
+      const { status, body } = await api('/deployments/propose_latest', { method: 'POST' }, humanJwt)
+      assert.equal(status, 200)
+      assert.equal(body.up_to_date, true)
+    },
+  )
+})
+
+test('propose_latest surfaces a clean error when GitHub is unreachable, instead of a crash', async () => {
+  await withFakeGithub(
+    (_req, res) => {
+      res.writeHead(500)
+      res.end()
+    },
+    async () => {
+      const { status, body } = await api('/deployments/propose_latest', { method: 'POST' }, humanJwt)
+      assert.equal(status, 502)
+      assert.match(body.error, /Could not reach GitHub/)
+    },
+  )
+})
+
+test('a device (not a human) cannot propose a deployment', async () => {
+  // deviceToken (from earlier in this file) was revoked by the "a revoked
+  // device is rejected" test above, so a fresh device is paired here to
+  // test the identity.kind check specifically, not revocation.
+  const pairing = await api('/pair_device', { method: 'POST', body: JSON.stringify({ device_name: 'Second Device' }) }, humanJwt)
+  const exchange = await api('/device_exchange', { method: 'POST', body: JSON.stringify({ code: pairing.body.pairing_code, device_name: 'Second Device' }) })
+  const freshDeviceToken = exchange.body.token as string
+
+  const { status, body } = await api('/deployments/propose_latest', { method: 'POST' }, freshDeviceToken)
+  assert.equal(status, 403)
+  assert.match(body.error, /human/)
+})
+
 test('a brand-new human (no pre-existing auth.users row) is auto-provisioned on first request', async () => {
   const freshUserId = randomUUID()
   const freshJwt = signTestJwt(freshUserId)
