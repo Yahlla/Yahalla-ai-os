@@ -1629,6 +1629,12 @@ function ChatSection() {
   const [callError, setCallError] = useState('')
   const callRecognizerRef = useRef<VoiceRecognizer | null>(null)
   const callSpeechRef = useRef<voiceOutput.SpeechHandle | null>(null)
+  // Which of the device's own installed voices speaks the AI's replies --
+  // persisted so the choice survives a reload. voiceURI is undefined until
+  // voices are loaded/picked, in which case speak() falls back to its own
+  // best-match-by-language default.
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([])
+  const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>(() => localStorage.getItem('yahalla_voice_uri') ?? '')
   const [cameraOpen, setCameraOpen] = useState(false)
   const [cameraError, setCameraError] = useState('')
   const [capturedImage, setCapturedImage] = useState<string | null>(null)
@@ -1998,6 +2004,7 @@ function ChatSection() {
     try {
       const handle = await voiceOutput.speak(text, {
         lang: 'ar-SA',
+        voiceURI: selectedVoiceURI || undefined,
         onEnd: () => {
           callSpeechRef.current = null
           if (callModeOpenRef.current) startCallListening()
@@ -2034,7 +2041,13 @@ function ChatSection() {
     }
     callModeOpenRef.current = true
     setCallModeOpen(true)
+    voiceOutput.listVoicesForLang('ar').then(setAvailableVoices)
     startCallListening()
+  }
+
+  function handleVoiceChange(uri: string) {
+    setSelectedVoiceURI(uri)
+    localStorage.setItem('yahalla_voice_uri', uri)
   }
 
   function endCall() {
@@ -2054,6 +2067,13 @@ function ChatSection() {
   async function openCamera() {
     setCameraError('')
     setCapturedImage(null)
+    // Defensive: stop any stream left over from a previous attempt before
+    // requesting a new one. Repeated taps on the camera button (e.g. after
+    // a black-screen attempt, or Retake -> Capture cycles) could otherwise
+    // accumulate live MediaStreams that never got released, which on
+    // several mobile browsers manifests as the tab itself crashing under
+    // memory/hardware pressure rather than a clean error.
+    stopCameraStream()
     // A single getUserMedia call -- it prompts for permission itself, so
     // a separate requestMediaPermission pre-check (as microphone/voice
     // input use) would mean opening and immediately stopping one stream
@@ -2222,13 +2242,11 @@ function ChatSection() {
       let streamingMessageId: string | null = null
       let usedCloudBoostModel: string | undefined
 
-      if (cloudBoostEnabled && platformApi.isPlatformApiConfigured()) {
-        // Deliberate escalation, not a fallback: still tries this even if
-        // local-runtime/browser would also work, because the user
-        // explicitly asked for the stronger model this turn. Recent
-        // history is sent as plain {role, content} turns -- the cloud
-        // tier has no tool access and no memory of its own, it only ever
-        // sees what's in this one request.
+      // Shared by both the explicit Cloud Boost toggle and the automatic
+      // fallback below -- recent history as plain {role, content} turns
+      // (the cloud tier has no tool access and no memory of its own, it
+      // only ever sees what's in this one request).
+      async function callCloudBoost(): Promise<ChatResponse> {
         const history = messages
           .filter((m) => m.role === 'user' || m.role === 'assistant')
           .slice(-20)
@@ -2236,10 +2254,16 @@ function ChatSection() {
         const cloudResult = await platformApi.cloudTierChat([...history, { role: 'user', content: message }])
         if (cloudResult.ok) {
           usedCloudBoostModel = cloudResult.model
-          result = { success: true, answer: cloudResult.content, conversation_id: conversationId ?? undefined }
-        } else {
-          result = { success: false, error: cloudResult.error }
+          return { success: true, answer: cloudResult.content, conversation_id: conversationId ?? undefined }
         }
+        return { success: false, error: cloudResult.error }
+      }
+
+      if (cloudBoostEnabled && platformApi.isPlatformApiConfigured()) {
+        // Deliberate escalation, not a fallback: still tries this even if
+        // local-runtime/browser would also work, because the user
+        // explicitly asked for the stronger model this turn.
+        result = await callCloudBoost()
       } else if (runtimeHealth?.llm_reachable) {
         setRuntimeTier('local')
         result = await localRuntime.sendChatMessage({ message, conversation_id: conversationId ?? undefined })
@@ -2267,6 +2291,19 @@ function ChatSection() {
         } finally {
           setStreamingMessageId(null)
         }
+      } else if (platformApi.isPlatformApiConfigured()) {
+        // Neither on-device tier exists here -- most commonly iOS Safari,
+        // which has no WebGPU (navigator.gpu is simply absent there) and
+        // no local-runtime app installed. Rather than falling straight to
+        // the legacy pre-local-first Supabase path (which requires a
+        // manually-marked-online model row and, in practice, usually just
+        // errors with "No AI model is currently online"), use the same
+        // opt-in cloud tier automatically -- still opt-in at the
+        // deployment level (an admin has to have saved a key in Settings
+        // for this to do anything but 503), just not something a phone
+        // user without WebGPU has to remember to toggle by hand every time.
+        setRuntimeTier('cloud')
+        result = await callCloudBoost()
       } else {
         setRuntimeTier('cloud')
         result = await api.sendChatMessage({
@@ -2661,6 +2698,21 @@ function ChatSection() {
                   {callStatus === 'speaking' && 'يتحدث…'}
                 </div>
                 {callError && <div className="composer-error">{callError}</div>}
+                {availableVoices.length > 0 && (
+                  <select
+                    className="chat-select"
+                    value={selectedVoiceURI}
+                    onChange={(e) => handleVoiceChange(e.target.value)}
+                    style={{ marginTop: 10 }}
+                  >
+                    <option value="">Default voice</option>
+                    {availableVoices.map((v) => (
+                      <option key={v.voiceURI} value={v.voiceURI}>
+                        {v.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 <div className="camera-modal-actions">
                   <button type="button" className="secondary-button" onClick={endCall}>
                     <PhoneOff size={14} /> End Call

@@ -40,16 +40,29 @@ function getVoices(): Promise<SpeechSynthesisVoice[]> {
   })
 }
 
+// The Web Speech API has no "gender" field on a voice -- exposing the
+// real, device-provided voice list (names like "Maged"/"Tarik" on iOS,
+// "Microsoft Naayf"/"Zeina" on Windows, etc.) and letting the user pick
+// one directly is the only honest way to offer a choice here, rather than
+// guessing gender from a name pattern that varies by OS/browser vendor.
+export async function listVoicesForLang(langPrefix: string): Promise<SpeechSynthesisVoice[]> {
+  const voices = await getVoices()
+  return voices.filter((v) => v.lang.toLowerCase().startsWith(langPrefix.toLowerCase()))
+}
+
 export async function speak(
   text: string,
-  options: { lang?: string; onEnd?: () => void; onError?: (message: string) => void } = {},
+  options: { lang?: string; voiceURI?: string; onEnd?: () => void; onError?: (message: string) => void } = {},
 ): Promise<SpeechHandle> {
   const lang = options.lang ?? 'ar-SA'
   const utterance = new SpeechSynthesisUtterance(text)
   utterance.lang = lang
 
   const voices = await getVoices()
-  const match = voices.find((v) => v.lang === lang) ?? voices.find((v) => v.lang.startsWith(lang.split('-')[0]!))
+  const match =
+    (options.voiceURI ? voices.find((v) => v.voiceURI === options.voiceURI) : undefined) ??
+    voices.find((v) => v.lang === lang) ??
+    voices.find((v) => v.lang.startsWith(lang.split('-')[0]!))
   if (match) utterance.voice = match
 
   utterance.onend = () => options.onEnd?.()
