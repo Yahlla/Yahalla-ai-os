@@ -25,7 +25,13 @@ badge that updates the moment it's saved.
   Supabase-hosted and self-hosted deployment paths.
 - `api/` -- multi-tenant coordination service (accounts, device pairing,
   task/approval queues, deployment proposals). Verifies Supabase-issued
-  JWTs for humans and opaque bearer tokens for paired devices.
+  JWTs for humans and opaque bearer tokens for paired devices. Supabase
+  projects sign tokens either with HS256 (a shared secret,
+  `SUPABASE_JWT_SECRET`) or ES256 (a managed keypair, verified against the
+  project's public JWKS via `SUPABASE_URL`) -- `api/src/jwt.ts` reads the
+  algorithm off each token's own header and verifies accordingly, so a
+  deployment works against either kind of project without needing to know
+  in advance which one it is. At least one of the two env vars must be set.
 - `deploy-agent/` -- the only thing allowed to run `git pull` /
   `docker compose up` against the live stack. Polls for admin-approved
   `deployment_proposals` rows and deploys exactly that ref -- no arbitrary

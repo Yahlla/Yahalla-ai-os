@@ -49,7 +49,12 @@ services:
     environment:
       PORT: 8080
       DATABASE_URL: postgresql://yahalla:${POSTGRES_PASSWORD}@postgres:5432/yahalla
-      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:?SUPABASE_JWT_SECRET must be set in .env}
+      # Supabase projects sign tokens with HS256 (SUPABASE_JWT_SECRET) or
+      # ES256 (SUPABASE_URL, verified via the project's public JWKS) --
+      # see api/src/jwt.ts. platform-api itself refuses to start unless at
+      # least one of these two is set; both may be set at once.
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-}
+      SUPABASE_URL: ${SUPABASE_URL:-}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       # The actual worker-concurrency cap: every request needs a pool
       # connection, so this bounds how much concurrent DB work platform-api

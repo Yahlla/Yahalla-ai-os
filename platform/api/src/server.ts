@@ -8,7 +8,12 @@ import { getCloudTierStatus, saveCloudTierSettings } from './settings.js'
 
 export type PlatformConfig = {
   port: number
-  supabaseJwtSecret: string
+  // Supabase projects sign tokens with HS256 (a shared secret) or ES256
+  // (a managed keypair, verified via the project's public JWKS) -- see
+  // jwt.ts for why both are supported. A deployment only needs whichever
+  // one its actual Supabase project uses.
+  supabaseJwtSecret?: string
+  supabaseUrl?: string
   allowedOrigins: string[]
   cloudTier: CloudTierConfig | null
 }
@@ -53,7 +58,7 @@ async function resolveIdentity(req: IncomingMessage, config: PlatformConfig): Pr
 
   if (token.split('.').length === 3) {
     try {
-      const claims = verifyJwt(token, config.supabaseJwtSecret)
+      const claims = await verifyJwt(token, { hs256Secret: config.supabaseJwtSecret, supabaseUrl: config.supabaseUrl })
       await ensureHumanUser(claims.sub, typeof claims.email === 'string' ? claims.email : undefined)
       return { userId: claims.sub, kind: 'human' }
     } catch {

@@ -54,15 +54,23 @@ if [ -f "$ENV_FILE" ]; then
 else
   echo "First-time setup -- a few values are needed once:"
   ask DOMAIN "Domain pointing at this VPS's IP (for automatic TLS)"
-  ask SUPABASE_JWT_SECRET "Supabase project JWT secret (Project Settings -> API -> JWT Secret)"
+  # Supabase projects sign tokens one of two ways -- check which your
+  # project uses under Project Settings -> API -> JWT Settings. Most
+  # projects created recently sign with ES256 (just need the project URL,
+  # nothing secret); older/legacy-mode projects sign with HS256 (need the
+  # actual "Legacy JWT Secret" value). Setting both is fine and safest if
+  # you're not sure -- platform-api uses whichever a given token needs.
+  ask SUPABASE_URL "Supabase project URL (https://xxxx.supabase.co) -- needed if your project signs tokens with ES256" ""
+  ask SUPABASE_JWT_SECRET "Supabase Legacy JWT Secret -- needed only if your project signs tokens with HS256" ""
   ask ALLOWED_ORIGINS "Frontend origin(s) allowed to call this API, comma-separated" "https://$DOMAIN"
   [ -n "$DOMAIN" ] || die "DOMAIN is required."
-  [ -n "$SUPABASE_JWT_SECRET" ] || die "SUPABASE_JWT_SECRET is required."
+  [ -n "$SUPABASE_URL" ] || [ -n "$SUPABASE_JWT_SECRET" ] || die "At least one of SUPABASE_URL or SUPABASE_JWT_SECRET is required."
 
   POSTGRES_PASSWORD=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 
   cat > "$ENV_FILE" <<EOF
 DOMAIN=$DOMAIN
+SUPABASE_URL=$SUPABASE_URL
 SUPABASE_JWT_SECRET=$SUPABASE_JWT_SECRET
 ALLOWED_ORIGINS=$ALLOWED_ORIGINS
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
