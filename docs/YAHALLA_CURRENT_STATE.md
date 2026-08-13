@@ -25,28 +25,125 @@ package below is built and dependency-managed independently:
 | `platform/deploy-agent/` | `@yahalla/deploy-agent` | The only thing allowed to `git pull`/`docker compose up` on the VPS | Node ≥22.5 |
 | `supabase/` | — | Migrations (schema source of truth) + `functions/yahalla-ai` (legacy Edge Function chat) | Deno (Supabase-hosted) |
 
-## AI architecture: four independent inference tiers
+## AI architecture: local-runtime is the real primary path (fixed, tested)
 
-Tried in this exact priority order, fresh on every message (`src/App.tsx`'s
-`sendMessage`):
+**This section describes the current, fixed routing.** An earlier phase of
+this build-out had made the opt-in cloud tier try FIRST on every message
+whenever `platform/api` was merely *configured* (not necessarily reachable
+or working) — meaning a deployment with a configured-but-down or
+misconfigured Strato server would show "Cloud smart tier is not reachable"
+instead of ever trying the local-runtime that might actually be running on
+the user's own machine. That default was removed; see the "Local-runtime ↔
+frontend connection" section below for the real fix and its end-to-end
+proof.
 
-1. **Cloud tier** (opt-in, `platform/api/src/cloudTier.ts`) — Anthropic or
-   Groq, server-side key only. Tried FIRST when `platform/api` is
-   configured and reachable. **Down whenever Strato is down.**
+Tried in this order, fresh on every message (`src/App.tsx`'s `sendMessage`):
+
+1. **Explicit user-toggled cloud escalations** (Coding Agent / Remote
+   Device / Cloud Boost) — only ever used when the user deliberately turns
+   one on for that message. Never automatic.
 2. **local-runtime tier** — the real Agent Runtime: full tool-calling,
-   permissions, approvals, memory. Selected when local-runtime's `/health`
-   reports `llm_reachable: true`.
+   permissions, approvals, memory, browser automation, multi-agent
+   dispatch. Selected whenever this tab is both (a) talking to a
+   local-runtime whose `/health` reports `llm_reachable: true`, and (b)
+   actually paired with it (has a real auth token — see below). This is
+   now the real default/primary path, not a fallback.
 3. **Browser tier** — WebGPU (`@mlc-ai/web-llm`) or WASM fallback
-   (`@wllama/wllama`) inside the tab. Chat only, no tools, no memory.
-4. **Legacy Supabase Edge Function** (`supabase/functions/yahalla-ai`) —
-   last resort. Proxies to whatever `servers`/`models` DB row is
-   registered; structurally dead without one.
+   (`@wllama/wllama`) inside the tab. Chat only, no tools, no memory, but
+   still zero external AI inference (runs entirely on-device in the tab).
+4. **Cloud tier, true last resort** (opt-in, `platform/api/src/cloudTier.ts`)
+   — only reached when neither 2 nor 3 exists at all (e.g. iOS Safari, no
+   WebGPU, no local-runtime installed) *and* platform-api is configured.
+5. **Legacy Supabase Edge Function** (`supabase/functions/yahalla-ai`) —
+   absolute last resort when platform-api isn't configured either.
+   Structurally dead without a manually-registered live server row.
 
 No hidden external-AI fallback exists in the browser or in local-runtime —
 the only two hardcoded external-AI endpoint strings in the whole repo
 (`api.anthropic.com`, `api.groq.com`) live exclusively inside
 `platform/api/src/cloudTier.ts`, a server-only file the browser bundle
 never contains.
+
+## Local-runtime ↔ frontend connection (fixed, tested end-to-end)
+
+Two real, distinct bugs were fixing this: the tier-priority bug above, and
+a second, more fundamental one — **a plain browser tab (not the Electron
+desktop app) had no way to authenticate to a local-runtime running on the
+same machine at all**, even if it correctly detected one was running.
+
+- `src/lib/localRuntime.ts`'s `getRuntimeInfo()` had exactly two sources
+  for the `{baseUrl, authToken}` pair every authenticated call needs: the
+  Electron IPC bridge (`window.yahallaDesktop`), or a `VITE_YAHALLA_RUNTIME_TOKEN`
+  build-time env var that's a documented dev-only convenience (impossible
+  to bake into a public production build, since every machine's
+  local-runtime generates its own random per-device token). A plain
+  browser tab at the hosted Control Center (`https://yahalla-ai.yahalla.de`)
+  had no third option — `checkRuntimeHealth()` could still succeed (that
+  route needs no auth), giving the false impression local-runtime was
+  usable, but the actual `/chat` call would immediately throw "Local Agent
+  Runtime is not reachable from this window."
+- Separately, local-runtime's own CORS allowlist (`config.ts`'s
+  `DEFAULT_ALLOWED_ORIGINS`) didn't include that production origin at all,
+  so even the no-auth `/health` poll would have been blocked by the
+  browser once the tier-priority bug above was fixed.
+
+**Fixed with a real, tested local pairing flow — no new server, no
+Strato involvement, token never leaves the machine except to a tab already
+running at a known Yahalla origin:**
+
+- `local-runtime/src/server.ts` adds `GET /pair/token` (no auth required —
+  nothing to authenticate with yet): returns `{baseUrl, authToken}`.
+  Protected the same way every other route already is: `applyCors()`
+  only attaches `Access-Control-Allow-Origin` for a request whose `Origin`
+  is in the exact-match `allowedOrigins` list, so only a tab already
+  running at a known Yahalla origin can read the response — a random
+  third-party page can still send the request but the browser blocks it
+  from reading the body back, per standard CORS enforcement (tested: real
+  HTTP requests with an allowed vs. a disallowed `Origin` header, asserting
+  the header is/isn't present).
+- `local-runtime/src/config.ts`'s `DEFAULT_ALLOWED_ORIGINS` now includes
+  `https://yahalla-ai.yahalla.de` (the real production Control Center
+  origin), and `loadOrCreateConfig()` self-heals an *existing* config file
+  written by an older version to include any newer official origin on next
+  load — tested end-to-end in a real isolated `$HOME`, via a real child
+  Node process, proving the merge actually persists to disk and preserves
+  a user-added origin.
+- `src/lib/localRuntime.ts` adds `pairWithLocalRuntime()` (fetches
+  `/pair/token`, stores the result in `localStorage`), `isPairedWithLocalRuntime()`,
+  and `clearStoredPairing()`. `getRuntimeInfo()` now checks, in order:
+  Electron bridge → stored browser pairing → dev env var.
+  `App.tsx` shows a distinct "Local Runtime detected · not connected yet"
+  status with a one-click "Connect local Yahalla" button whenever
+  `/health` succeeds but this tab isn't paired yet, instead of silently
+  falling through to another tier or showing a blocking cloud error.
+- Also fixed while making this actually testable: `src/lib/supabase.ts`
+  used to `throw` at module load (crashing the entire frontend bundle,
+  local-runtime/browser tiers included) if Supabase env vars were unset.
+  Now degrades the same way `platformApi.ts` already documents for its own
+  optional dependency — a console warning, not a crash; sign-in/sync are
+  disabled, AI features are unaffected.
+
+**Proven end-to-end, not just by inspection** — `test/localRuntimeE2E.smoke.mjs`
+(+ `test/localRuntimeE2E-harness.{html,ts}`) starts a real local-runtime
+HTTP server (local-runtime's actual compiled `server.js`, only its LLM
+backend swapped for a deterministic fake HTTP server — the same discipline
+local-runtime's own test suite uses everywhere, since a real GGUF model is
+multi-gigabytes and not something a CI sandbox can fetch) bound to the real
+default port 8765, a real Vite dev server for the frontend with
+platform-api deliberately left unconfigured, and drives a real headless
+Chromium through: health check → pairing handshake → a real `/chat`
+request → a real `read_project_file` tool call against a real file on
+disk → a real answer. Confirms, for real: local-runtime is reached,
+"the LLM" produces a response, a real tool executes, and platform-api/
+Strato is never configured or touched anywhere in the path (structurally
+cannot be, since it's never imported/reachable in this harness). Run
+explicitly: `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers node
+test/localRuntimeE2E.smoke.mjs` (not part of `npm test` — spins up two
+real HTTP servers plus a browser). Passed twice in a row when last run.
+- `local-runtime/test/localPairing.test.ts` (8 tests) covers the
+  server-side pieces in isolation: the origin-merge logic, the real
+  config-file self-heal, and `/pair/token`'s CORS behavior. local-runtime
+  suite now 121/121.
 
 ## local-runtime deep facts (the part this build-out extends)
 
@@ -346,11 +443,14 @@ multi-step task, not a browser page the user opens themselves:
   `scripts/llm-tunnel/`/`mac-setup.sh` and `package-lock.json` transitive
   noise).
 - Supabase is Auth + dashboard-data + one Realtime channel + the legacy
-  Edge Function — **never** AI inference. **Hard coupling to flag**:
-  `src/lib/supabase.ts` throws at module load if
-  `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` are unset — today, "no
-  Supabase" means "the frontend bundle fails to initialize at all," not
-  "AI still works, dashboard doesn't."
+  Edge Function — **never** AI inference. **Fixed hard coupling**:
+  `src/lib/supabase.ts` used to throw at module load if
+  `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` were unset, crashing the
+  entire frontend bundle (local-runtime/browser AI tiers included, since
+  they share the same bundle). Now degrades the same way
+  `src/lib/platformApi.ts` already documents for its own optional
+  dependency: a console warning, not a crash — "no Supabase" now correctly
+  means "sign-in and cross-device sync are unavailable," AI still works.
 - Every Strato-exclusive feature (cloud tier, cross-device sync, vector
   memory, Cloud Coding Agent, GitHub OAuth/webhook, the deploy pipeline)
   degrades to a silent no-op when `platform/api` is unset/unreachable —
@@ -363,22 +463,26 @@ multi-step task, not a browser page the user opens themselves:
 root:               tsc -b clean; vite build succeeds (6 chunks, lib chunk
                      flagged oversized by Vite, not code-split); oxlint: 3
                      warnings, 0 errors; npm test (langDetect+capabilities):
-                     23/23 pass
+                     23/23 pass; test/localRuntimeE2E.smoke.mjs (real
+                     local-runtime + real Vite + real headless Chromium,
+                     needs PLAYWRIGHT_BROWSERS_PATH in this sandbox): PASS,
+                     confirmed twice in a row (not part of npm test)
 packages/agent-tools: typecheck clean; build clean (no test script)
 device-agent:        typecheck clean; build clean (no test script)
-local-runtime:       typecheck clean; build clean; npm test: 113/113 pass,
+local-runtime:       typecheck clean; build clean; npm test: 121/121 pass,
                      confirmed stable across repeated runs (76 baseline +
                      7 from Phase 1 reliability.test.ts + 6 from Phase 2
                      selfDev.test.ts + 7 from Phase 3 projectIndex.test.ts
                      + 12 from Phase 4 browser.test.ts + 5 from Phase 5
-                     subAgents.test.ts; needs a reachable Postgres for
-                     databaseIntegration.test.ts's arbitrary-db-connector
-                     tests — fails cleanly and only that suite if Postgres
-                     is absent, everything else passes regardless;
-                     browser.test.ts's live-browser tests need a real
-                     Chrome/Chromium/Edge findable on the machine — see the
-                     browser-tool section below — or they skip cleanly
-                     rather than failing)
+                     subAgents.test.ts + 8 from the local-runtime↔frontend
+                     connection fix's localPairing.test.ts; needs a
+                     reachable Postgres for databaseIntegration.test.ts's
+                     arbitrary-db-connector tests — fails cleanly and only
+                     that suite if Postgres is absent, everything else
+                     passes regardless; browser.test.ts's live-browser
+                     tests need a real Chrome/Chromium/Edge findable on the
+                     machine — see the browser-tool section below — or
+                     they skip cleanly rather than failing)
 platform/api:        typecheck clean; build clean; npm test: 101/101 pass
                      (needs TEST_DATABASE_URL + schema applied via
                      platform/db/apply.sh)

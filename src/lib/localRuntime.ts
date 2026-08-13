@@ -5,20 +5,49 @@ import type { ChatResponse } from './types'
 // only used elsewhere in this app for auth/optional sync, never for AI
 // inference itself.
 //
-// Two ways this frontend can learn how to reach it:
+// Three ways this frontend can learn how to reach it, tried in order:
 // 1. Running inside the Electron desktop shell: window.yahallaDesktop
 //    (exposed by desktop/src/preload.cjs) hands over {baseUrl, authToken}
-//    via a secure IPC bridge -- the real path for end users.
-// 2. Running as a plain browser page during `vite dev` (no Electron): a
-//    dev-only fallback reads VITE_YAHALLA_RUNTIME_TOKEN from the local
-//    .env, which a developer copies out of ~/.yahalla/runtime/config.json
-//    once. This is a developer convenience, not a production security
-//    boundary -- the real boundary is the Electron bridge.
+//    via a secure IPC bridge -- the real path for the packaged desktop app.
+// 2. Running as a plain browser page (e.g. the hosted Control Center,
+//    https://yahalla-ai.yahalla.de): a stored pairing in localStorage,
+//    obtained via pairWithLocalRuntime() below -- a one-click, explicit
+//    action that fetches local-runtime's own /pair/token endpoint
+//    (server.ts). That endpoint only ever succeeds cross-origin for a
+//    request whose Origin is on local-runtime's own CORS allowlist (see
+//    local-runtime/src/config.ts's DEFAULT_ALLOWED_ORIGINS), so an
+//    arbitrary third-party page cannot silently obtain this device's
+//    token just by knowing this code exists -- only a page already
+//    running at a known Yahalla origin can. The token itself never
+//    passes through Strato or any other server; it goes straight from
+//    the local-runtime process to this tab.
+// 3. Running during `vite dev` (no Electron, no pairing yet): a dev-only
+//    fallback reads VITE_YAHALLA_RUNTIME_TOKEN from the local .env, which
+//    a developer copies out of ~/.yahalla/runtime/config.json once. Not a
+//    production security boundary -- the Electron bridge and the pairing
+//    flow are.
 declare global {
   interface Window {
     yahallaDesktop?: {
       getRuntimeInfo: () => Promise<{ baseUrl: string; authToken: string } | null>
     }
+  }
+}
+
+const PAIRING_STORAGE_KEY = 'yahalla_local_runtime_pairing'
+export const DEFAULT_LOCAL_RUNTIME_URL = 'http://127.0.0.1:8765'
+
+type StoredPairing = { baseUrl: string; authToken: string }
+
+function readStoredPairing(): StoredPairing | null {
+  try {
+    const raw = window.localStorage.getItem(PAIRING_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<StoredPairing>
+    if (typeof parsed.baseUrl !== 'string' || typeof parsed.authToken !== 'string') return null
+    return { baseUrl: parsed.baseUrl, authToken: parsed.authToken }
+  } catch {
+    return null
   }
 }
 
@@ -32,10 +61,57 @@ export async function getRuntimeInfo(): Promise<{ baseUrl: string; authToken: st
     return cachedInfo
   }
 
+  const stored = readStoredPairing()
+  if (stored) {
+    cachedInfo = stored
+    return cachedInfo
+  }
+
   const devToken = import.meta.env.VITE_YAHALLA_RUNTIME_TOKEN as string | undefined
-  const devUrl = (import.meta.env.VITE_YAHALLA_RUNTIME_URL as string | undefined) ?? 'http://127.0.0.1:8765'
+  const devUrl = (import.meta.env.VITE_YAHALLA_RUNTIME_URL as string | undefined) ?? DEFAULT_LOCAL_RUNTIME_URL
   cachedInfo = devToken ? { baseUrl: devUrl, authToken: devToken } : null
   return cachedInfo
+}
+
+// One-click pairing for a plain browser tab (no Electron bridge): fetches
+// local-runtime's /pair/token over plain HTTP+CORS (see the module comment
+// above for why this is safe) and remembers it in localStorage so future
+// visits don't need to re-pair. Only meaningful to call when
+// window.yahallaDesktop is absent -- inside Electron, getRuntimeInfo()
+// already has a real answer and this is never needed.
+export async function pairWithLocalRuntime(baseUrl: string = DEFAULT_LOCAL_RUNTIME_URL): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(`${baseUrl}/pair/token`, { signal: AbortSignal.timeout(5000) })
+    if (!response.ok) return { ok: false, error: `Local Agent Runtime returned HTTP ${response.status}.` }
+    const data = (await response.json()) as Partial<StoredPairing>
+    if (typeof data.baseUrl !== 'string' || typeof data.authToken !== 'string') {
+      return { ok: false, error: 'Local Agent Runtime returned an unexpected pairing response.' }
+    }
+    const pairing: StoredPairing = { baseUrl: data.baseUrl, authToken: data.authToken }
+    window.localStorage.setItem(PAIRING_STORAGE_KEY, JSON.stringify(pairing))
+    cachedInfo = pairing
+    return { ok: true }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : 'Could not reach a local Agent Runtime on this device.',
+    }
+  }
+}
+
+export function clearStoredPairing(): void {
+  window.localStorage.removeItem(PAIRING_STORAGE_KEY)
+  if (!window.yahallaDesktop) cachedInfo = undefined
+}
+
+// True once this tab actually knows how to authenticate to a local
+// runtime (Electron bridge, a completed pairing, or the dev token) --
+// distinct from checkRuntimeHealth()'s result, which only proves *a*
+// local-runtime process is running and reachable, not that this specific
+// tab is allowed to talk to it yet. sendMessage uses both together: health
+// without this means "detected, but needs one click to connect."
+export async function isPairedWithLocalRuntime(): Promise<boolean> {
+  return (await getRuntimeInfo()) !== null
 }
 
 async function runtimeFetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -59,7 +135,7 @@ export type RuntimeHealth = {
 export async function checkRuntimeHealth(): Promise<RuntimeHealth | null> {
   try {
     const info = await getRuntimeInfo()
-    const base = info?.baseUrl ?? ((import.meta.env.VITE_YAHALLA_RUNTIME_URL as string | undefined) ?? 'http://127.0.0.1:8765')
+    const base = info?.baseUrl ?? ((import.meta.env.VITE_YAHALLA_RUNTIME_URL as string | undefined) ?? DEFAULT_LOCAL_RUNTIME_URL)
     const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) })
     if (!response.ok) return null
     return (await response.json()) as RuntimeHealth

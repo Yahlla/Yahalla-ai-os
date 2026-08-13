@@ -122,6 +122,26 @@ export function createHttpServer(deps: ServerDeps) {
       return
     }
 
+    // Browser pairing: how a plain browser tab (no Electron IPC bridge --
+    // e.g. the hosted Control Center) obtains this device's auth token
+    // without it ever being baked into a public build. Deliberately also
+    // unauthenticated (nothing else to authenticate *with* yet), but not
+    // open to just anyone: applyCors() above already only attaches
+    // Access-Control-Allow-Origin for a request whose Origin header is in
+    // config.allowedOrigins (an exact-match allowlist of official Yahalla
+    // origins -- see config.ts). A browser enforces CORS on the caller's
+    // side, so a page at any other origin can still send this request, but
+    // cannot read the response body back -- only a tab already running at
+    // a known Yahalla origin can complete pairing. A direct top-level
+    // visit to this URL (no Origin header at all, e.g. typed by hand)
+    // still returns the token in plain JSON -- equivalent to opening
+    // ~/.yahalla/runtime/config.json directly, i.e. already assumes local
+    // machine access.
+    if (path === '/pair/token' && req.method === 'GET') {
+      send(res, 200, { baseUrl: `http://127.0.0.1:${deps.config.port}`, authToken: deps.config.authToken })
+      return
+    }
+
     if (!isAuthorized(req, deps.config)) {
       send(res, 401, { success: false, error: 'Missing or invalid local runtime token.' })
       return

@@ -2356,7 +2356,9 @@ function ChatSection() {
   const [modelLoadProgress, setModelLoadProgress] = useState<{ progress: number; text: string } | null>(null)
   const [modelLoadStalled, setModelLoadStalled] = useState(false)
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null)
-  const [runtimeTier, setRuntimeTier] = useState<'local' | 'browser' | 'cloud' | 'device' | null>(null)
+  const [runtimeTier, setRuntimeTier] = useState<'local' | 'local-unpaired' | 'browser' | 'cloud' | 'device' | null>(null)
+  const [connectingLocalRuntime, setConnectingLocalRuntime] = useState(false)
+  const [localConnectError, setLocalConnectError] = useState('')
   // Explicit, user-toggled escalation to the opt-in cloud smart tier (see
   // platform/api/src/cloudTier.ts) -- distinct from runtimeTier's 'cloud',
   // which is the legacy last-resort fallback when no on-device path exists
@@ -2564,18 +2566,33 @@ function ChatSection() {
     let cancelled = false
     async function detectTier() {
       const health = await localRuntime.checkRuntimeHealth()
-      if (health?.llm_reachable) {
+      const paired = health?.llm_reachable ? await localRuntime.isPairedWithLocalRuntime() : false
+
+      if (health?.llm_reachable && paired) {
         if (!cancelled) setRuntimeTier('local')
         return
       }
-      if (await browserRuntime.checkBrowserRuntimeAvailable()) {
+
+      const browserAvailable = await browserRuntime.checkBrowserRuntimeAvailable()
+      // Zero-friction: start the one-time download now, in the
+      // background, rather than waiting for the user to hit send. Errors
+      // here are silently swallowed -- sendMessage's own call to the same
+      // function will surface them normally if the background attempt
+      // didn't already succeed.
+      if (browserAvailable) ensureBrowserModelLoading(false).catch(() => {})
+
+      if (health?.llm_reachable && !paired) {
+        // A real local-runtime is running on this device but this browser
+        // tab hasn't connected to it yet (see localRuntime.ts's pairing
+        // flow) -- still worth telling the user, distinctly from "nothing
+        // local at all", since one click on "Connect" gets them full
+        // tool-using local-runtime instead of the tool-less browser tier.
+        if (!cancelled) setRuntimeTier('local-unpaired')
+        return
+      }
+
+      if (browserAvailable) {
         if (!cancelled) setRuntimeTier('browser')
-        // Zero-friction: start the one-time download now, in the
-        // background, rather than waiting for the user to hit send.
-        // Errors here are silently swallowed -- sendMessage's own call
-        // to the same function will surface them normally if the
-        // background attempt didn't already succeed.
-        ensureBrowserModelLoading(false).catch(() => {})
         return
       }
       if (!cancelled) setRuntimeTier('cloud')
@@ -2585,6 +2602,21 @@ function ChatSection() {
       cancelled = true
     }
   }, [])
+
+  async function connectLocalRuntime() {
+    setConnectingLocalRuntime(true)
+    setLocalConnectError('')
+    try {
+      const result = await localRuntime.pairWithLocalRuntime()
+      if (result.ok) {
+        setRuntimeTier('local')
+      } else {
+        setLocalConnectError(result.error)
+      }
+    } finally {
+      setConnectingLocalRuntime(false)
+    }
+  }
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -3105,28 +3137,19 @@ function ChatSection() {
         return { success: true, answer: `${agentResult.summary}${prNote}`, conversation_id: conversationId ?? undefined }
       }
 
-      // Cloud is the primary brain by default: when the platform's cloud
-      // smart tier is configured (Settings -> Cloud Smart Tier -- Claude
-      // or an OpenAI-compatible 70B model), every message tries it FIRST,
-      // ahead of local-runtime and browser WebGPU, not just as a
-      // last-resort fallback for devices with neither on-device tier. This
-      // is what makes "no local Agent required" literally true: a fresh
-      // browser with nothing installed gets the same primary brain as a
-      // machine running local-runtime. Skipped when an explicit toggle
-      // below already picked a specific path this turn, and falls straight
-      // through to the existing local/browser/legacy chain if the cloud
-      // call itself fails (network issue, not yet configured, rate
-      // limited) -- cloud-primary, not cloud-only.
-      let cloudPrimaryResult: ChatResponse | null = null
-      if (!codingAgentEnabled && !deviceTaskEnabled && !cloudBoostEnabled && platformApi.isPlatformApiConfigured()) {
-        setRuntimeTier('cloud')
-        const attempt = await callCloudBoost()
-        if (attempt.success) cloudPrimaryResult = attempt
-      }
+      // Local-runtime is the real primary Agent path: whenever this
+      // browser tab has a real local Agent Runtime it's paired with
+      // (Electron bridge, or a completed browser pairing -- see
+      // localRuntime.ts), every message goes there first, full stop. No
+      // automatic cloud-first default: Strato/the cloud smart tier is only
+      // ever used when the user explicitly turns on one of the toggles
+      // below (codingAgentEnabled/deviceTaskEnabled/cloudBoostEnabled), or
+      // as the true last resort further down when neither local-runtime
+      // nor the on-device browser tier (WebGPU/WASM, still zero external
+      // AI inference) is available at all.
+      const localPaired = runtimeHealth?.llm_reachable ? await localRuntime.isPairedWithLocalRuntime() : false
 
-      if (cloudPrimaryResult) {
-        result = cloudPrimaryResult
-      } else if (codingAgentEnabled && platformApi.isPlatformApiConfigured()) {
+      if (codingAgentEnabled && platformApi.isPlatformApiConfigured()) {
         setRuntimeTier('cloud')
         result = await callCodingAgent()
       } else if (deviceTaskEnabled && platformApi.isPlatformApiConfigured()) {
@@ -3137,7 +3160,7 @@ function ChatSection() {
         // local-runtime/browser would also work, because the user
         // explicitly asked for the stronger model this turn.
         result = await callCloudBoost()
-      } else if (runtimeHealth?.llm_reachable) {
+      } else if (localPaired) {
         setRuntimeTier('local')
         streamingMessageId = crypto.randomUUID()
         const idForClosure = streamingMessageId
@@ -3394,14 +3417,27 @@ function ChatSection() {
             <div className="chat-agent-status">
               <span />
               {runtimeTier === 'local' && 'Local Runtime · Full speed on this device'}
+              {runtimeTier === 'local-unpaired' && 'Local Runtime detected · not connected yet'}
               {runtimeTier === 'browser' &&
                 `Browser Mode (${browserRuntime.activeBrowserEngine() === 'wasm' ? 'WebAssembly' : 'WebGPU'}) · one-time download`}
               {runtimeTier === 'cloud' && 'Cloud fallback'}
               {runtimeTier === 'device' && 'Remote Device · real file/git/GitHub access'}
               {runtimeTier === null && 'AI Orchestrator · Online'}
             </div>
+            {localConnectError && <div className="chat-agent-status" style={{ color: '#fca5a5' }}>{localConnectError}</div>}
           </div>
-          {runtimeTier && runtimeTier !== 'local' && runtimeTier !== 'device' && (
+          {runtimeTier === 'local-unpaired' && (
+            <button
+              type="button"
+              className="runtime-tier-cta"
+              disabled={connectingLocalRuntime}
+              onClick={connectLocalRuntime}
+              title="Connect this browser tab to the local Yahalla Agent Runtime running on this device"
+            >
+              <Zap size={12} /> {connectingLocalRuntime ? 'Connecting…' : 'Connect local Yahalla'}
+            </button>
+          )}
+          {runtimeTier && runtimeTier !== 'local' && runtimeTier !== 'local-unpaired' && runtimeTier !== 'device' && (
             <a
               className="runtime-tier-cta"
               href="https://github.com/Yahlla/Yahalla-ai-os/blob/main/scripts/setup-local.sh"
