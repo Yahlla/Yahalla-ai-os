@@ -9,7 +9,7 @@ import * as localRuntime from './lib/localRuntime'
 import * as browserRuntime from './lib/browserRuntime'
 import * as platformApi from './lib/platformApi'
 import { requestMediaPermission } from './lib/capabilities'
-import { detectLanguage, languageInstructionLine } from './lib/langDetect'
+import { detectLanguage, languageInstructionLine, speechLangTag } from './lib/langDetect'
 import { recognizeText } from './lib/ocr'
 import { overlayWatermark } from './lib/imageEditor'
 import { createVoiceRecognizer, isSpeechRecognitionSupported, type VoiceRecognizer } from './lib/voiceInput'
@@ -2306,6 +2306,14 @@ function ChatSection() {
   const [callError, setCallError] = useState('')
   const callRecognizerRef = useRef<VoiceRecognizer | null>(null)
   const callSpeechRef = useRef<voiceOutput.SpeechHandle | null>(null)
+  // Adaptive per-call language: starts from the browser's own locale
+  // (navigator.language is already a real BCP-47 tag, not a guess), then
+  // updates after every user turn to whatever detectLanguage() actually
+  // found in their transcript -- so a call that starts in English but
+  // switches to Arabic mid-call has both STT and TTS follow along, the
+  // same "respond in the user's language" behavior text chat already has,
+  // extended to voice.
+  const callLangRef = useRef<string>(navigator.language || 'en-US')
   // Which of the device's own installed voices speaks the AI's replies --
   // persisted so the choice survives a reload. voiceURI is undefined until
   // voices are loaded/picked, in which case speak() falls back to its own
@@ -2687,7 +2695,7 @@ function ChatSection() {
     }
 
     const recognizer = createVoiceRecognizer({
-      lang: 'ar-SA',
+      lang: navigator.language || 'ar-SA',
       onTranscript: (text, isFinal) => {
         setInput((prev) => (isFinal ? `${prev}${prev && !prev.endsWith(' ') ? ' ' : ''}${text}` : prev))
       },
@@ -2721,11 +2729,24 @@ function ChatSection() {
     setCallError('')
     setCallStatus('listening')
     const recognizer = createVoiceRecognizer({
-      lang: 'ar-SA',
+      lang: callLangRef.current,
       onTranscript: (text, isFinal) => {
         if (!isFinal || !text.trim()) return
         callRecognizerRef.current?.stop()
         callRecognizerRef.current = null
+        // Adapts the call's language to what the user actually just said,
+        // not what it started as -- the same real per-message detection
+        // text chat already uses (langDetect.ts), extended to voice so a
+        // mid-call language switch is followed for both the next
+        // recognition pass and the reply's TTS voice.
+        const detected = detectLanguage(text)
+        if (detected.confidence > 0) {
+          const tag = speechLangTag(detected.code)
+          if (tag !== callLangRef.current) {
+            callLangRef.current = tag
+            voiceOutput.listVoicesForLang(detected.code).then(setAvailableVoices)
+          }
+        }
         setCallStatus('thinking')
         void sendMessage(undefined, text.trim())
       },
@@ -2750,7 +2771,7 @@ function ChatSection() {
     setCallStatus('speaking')
     try {
       const handle = await voiceOutput.speak(text, {
-        lang: 'ar-SA',
+        lang: callLangRef.current,
         voiceURI: selectedVoiceURI || undefined,
         onEnd: () => {
           callSpeechRef.current = null
@@ -2768,6 +2789,25 @@ function ChatSection() {
     } catch {
       if (callModeOpenRef.current) startCallListening()
     }
+  }
+
+  // Tap-to-interrupt: cancels the current reply and starts listening again
+  // immediately. This is the real, working form of "barge-in" for this
+  // call mode -- true voice-activated barge-in (interrupting just by
+  // speaking over Yahalla, no tap needed) would need running speech
+  // recognition and speech synthesis concurrently, which the plain Web
+  // Speech API cannot do reliably: it exposes no echo-cancellation control
+  // over its own microphone capture, so a live recognizer would pick up
+  // Yahalla's own voice out of the speakers as if it were the user
+  // talking. That needs real audio-pipeline work (a WebRTC/AudioWorklet
+  // capture with echoCancellation, feeding a separate local recognizer) --
+  // not implemented here; this tap control is the honest, reliable
+  // alternative rather than a barge-in that would falsely self-interrupt.
+  function interruptSpeaking() {
+    if (callStatus !== 'speaking') return
+    callSpeechRef.current?.cancel()
+    callSpeechRef.current = null
+    startCallListening()
   }
 
   async function startCall() {
@@ -2788,7 +2828,12 @@ function ChatSection() {
     }
     callModeOpenRef.current = true
     setCallModeOpen(true)
-    voiceOutput.listVoicesForLang('ar').then(setAvailableVoices)
+    callLangRef.current = navigator.language || 'en-US'
+    // The primary language subtag (the part before "-") is the 2-letter
+    // code listVoicesForLang expects -- navigator.language is already a
+    // real BCP-47 tag (e.g. "ar-SA", "en-US"), not prose, so this is a
+    // direct parse, not a run through the text-based detector.
+    voiceOutput.listVoicesForLang(callLangRef.current.split('-')[0] || 'en').then(setAvailableVoices)
     startCallListening()
   }
 
@@ -3732,7 +3777,13 @@ function ChatSection() {
           {callModeOpen && (
             <div className="camera-modal">
               <div className="camera-modal-inner call-modal-inner">
-                <div className={`call-orb ${callStatus}`}>
+                <div
+                  className={`call-orb ${callStatus}`}
+                  role={callStatus === 'speaking' ? 'button' : undefined}
+                  tabIndex={callStatus === 'speaking' ? 0 : undefined}
+                  title={callStatus === 'speaking' ? 'Tap to interrupt' : undefined}
+                  onClick={callStatus === 'speaking' ? interruptSpeaking : undefined}
+                >
                   {callStatus === 'listening' && <Mic size={28} />}
                   {callStatus === 'thinking' && <Sparkles size={28} />}
                   {callStatus === 'speaking' && <Phone size={28} />}
@@ -3740,7 +3791,7 @@ function ChatSection() {
                 <div className="call-status-text">
                   {callStatus === 'listening' && 'يستمع…'}
                   {callStatus === 'thinking' && 'يفكر…'}
-                  {callStatus === 'speaking' && 'يتحدث…'}
+                  {callStatus === 'speaking' && 'يتحدث… (اضغط للمقاطعة)'}
                 </div>
                 {callError && <div className="composer-error">{callError}</div>}
                 {availableVoices.length > 0 && (

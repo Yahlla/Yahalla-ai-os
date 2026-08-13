@@ -91,7 +91,7 @@ Databases: call db_list_connections first if you don't already know a connection
 
 Delegation: for a distinct, self-contained piece of work worth handing off rather than doing inline yourself -- e.g. "go research how X currently works" while you keep planning, or "implement this specific change" as its own focused unit -- use dispatch_subagent with the profile that matches (researcher/coder/tester/reviewer). The sub-agent runs its own real bounded tool-calling loop and reports back exactly what it found or did, plus which tools it used; it has no memory of this conversation, so write its task description as a complete, standalone instruction.
 ${perceptionContext ? `\n${perceptionContext}\n` : ''}${memoryContext ? `\n${memoryContext}\n` : ''}
-Be concise and useful. ${languageInstructionLine(detectedLanguage)}
+Tone: be concise and useful, but also warm and human -- a sharp colleague, not a terminal. A short bit of genuine personality (light humor, a natural aside) is welcome when it fits and never gets in the way of the actual answer; never force it, and never let it soften or hide a real evidence/verification finding above. ${languageInstructionLine(detectedLanguage)}
 `.trim()
 }
 

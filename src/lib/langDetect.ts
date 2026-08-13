@@ -100,6 +100,40 @@ export function detectLanguage(text: string, fallback: LanguageMatch = DEFAULT_L
   return fallback
 }
 
+// BCP-47 tags for the Web Speech API (SpeechRecognition.lang and
+// speechSynthesis voice matching both key off this format, not the plain
+// ISO 639-1 codes detectLanguage() returns). A representative locale per
+// detected language -- browser/OS speech support for any of these still
+// varies (voice call mode already degrades to "unsupported" honestly when
+// isSpeechRecognitionSupported()/isSpeechSynthesisSupported() say no), this
+// mapping only decides *which* tag to ask for.
+const SPEECH_LANG_TAGS: Record<string, string> = {
+  ar: 'ar-SA',
+  en: 'en-US',
+  fr: 'fr-FR',
+  es: 'es-ES',
+  de: 'de-DE',
+  it: 'it-IT',
+  pt: 'pt-PT',
+  nl: 'nl-NL',
+  tr: 'tr-TR',
+  id: 'id-ID',
+  vi: 'vi-VN',
+  sw: 'sw-KE',
+  ru: 'ru-RU',
+  zh: 'zh-CN',
+  ja: 'ja-JP',
+  ko: 'ko-KR',
+  hi: 'hi-IN',
+  th: 'th-TH',
+  he: 'he-IL',
+  el: 'el-GR',
+}
+
+export function speechLangTag(code: string): string {
+  return SPEECH_LANG_TAGS[code] ?? 'en-US'
+}
+
 // Matches CLOUD_BOOST_SYSTEM_PROMPT's exact phrasing (App.tsx) so all
 // three inference tiers (cloud, local-runtime, browser-WebGPU) give the
 // model the identical instruction, worded identically -- the only

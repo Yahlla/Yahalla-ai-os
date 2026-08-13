@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { detectLanguage } from '../src/lib/langDetect.ts'
+import { detectLanguage, speechLangTag } from '../src/lib/langDetect.ts'
 
 test('Arabic script is detected', () => {
   assert.equal(detectLanguage('مرحباً، كيف يمكنني مساعدتك اليوم؟').code, 'ar')
@@ -65,4 +65,21 @@ test('an Arabic sentence with an embedded order number is still detected as Arab
 test('unrecognized Latin-script text with no marker words falls back to English', () => {
   const result = detectLanguage('xyzabc qwerty foobar')
   assert.equal(result.code, 'en')
+})
+
+test('speechLangTag maps every detectLanguage code to a real BCP-47 tag', () => {
+  assert.equal(speechLangTag('ar'), 'ar-SA')
+  assert.equal(speechLangTag('en'), 'en-US')
+  assert.equal(speechLangTag('fr'), 'fr-FR')
+  assert.equal(speechLangTag('zh'), 'zh-CN')
+  assert.equal(speechLangTag('ja'), 'ja-JP')
+})
+
+test('speechLangTag falls back to en-US for an unmapped code, not undefined/crash', () => {
+  assert.equal(speechLangTag('xx'), 'en-US')
+})
+
+test('detectLanguage + speechLangTag chain end to end for a real voice-mode transcript', () => {
+  const detected = detectLanguage('Bonjour, où est ma commande ?')
+  assert.equal(speechLangTag(detected.code), 'fr-FR')
 })

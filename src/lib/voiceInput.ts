@@ -1,9 +1,22 @@
 // Browser-native speech-to-text (Web Speech API) -- zero dependency, no
-// model, no server call: this is the browser's own OS-level speech
-// recognition, the same category of capability as navigator.mediaDevices
-// already used in capabilities.ts. Not universally supported (Safari/
-// Firefox lag Chrome/Edge here); isSpeechRecognitionSupported() is the
-// honest capability check the composer's mic button gates on.
+// model bundled/downloaded by this app, no server of ours involved. Not
+// universally supported (Safari/Firefox lag Chrome/Edge here);
+// isSpeechRecognitionSupported() is the honest capability check the
+// composer's mic button and call mode gate on.
+//
+// Known limitation, stated plainly rather than glossed over: in Chrome/
+// Edge (the browsers that actually implement this API), the audio is sent
+// to the browser vendor's own cloud speech-recognition service -- this is
+// how the Web Speech API itself works everywhere it ships, not a choice
+// this app makes. It is not routed through any Yahalla/Strato server and
+// no chat/agent inference happens there, but it is not on-device
+// recognition either, unlike this app's TTS (voiceOutput.ts, genuinely
+// local via speechSynthesis) or its text-chat LLM tiers. A fully local
+// STT path would mean bundling a real on-device model (e.g. a WASM-
+// compiled Whisper build, following the same self-hosted-asset pattern
+// already used for OCR/wllama/MediaPipe) -- not implemented here; this
+// module is the honest browser-native fallback, not a claim of full
+// on-device recognition.
 
 // Not in TypeScript's standard DOM lib (still marked experimental) --
 // this is the minimal shape this module actually uses, not a full typing
