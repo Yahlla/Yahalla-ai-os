@@ -2,7 +2,7 @@ import type { AccessLevel, PermissionScope } from './permissions.js'
 
 export type ToolDef = {
   key: string
-  category: 'files' | 'system' | 'github' | 'database' | 'browser'
+  category: 'files' | 'system' | 'github' | 'database' | 'browser' | 'orchestration'
   requiresApproval: boolean
   description: string
   parameters: Record<string, unknown>
@@ -250,6 +250,22 @@ export const TOOLS: ToolDef[] = [
       additionalProperties: false,
     },
     permission: { scope: 'network', access: 'write' },
+  },
+  {
+    key: 'dispatch_subagent',
+    category: 'orchestration',
+    requiresApproval: false,
+    description: 'Dispatch a bounded subtask to a specialized sub-agent -- its own focused system prompt, its own restricted tool set, and its own round budget -- and get back its final report plus exactly which tools it used. Use this to delegate a distinct piece of work (e.g. hand research to "researcher" while you keep planning, or hand implementation to "coder") instead of doing everything yourself in one long thread. profile must be one of: researcher (read-only investigation), coder (implements a change), tester (runs real test/build/lint commands), reviewer (reviews a real diff). The sub-agent has no memory of this conversation -- write a clear, self-contained task description.',
+    parameters: {
+      type: 'object',
+      properties: {
+        profile: { type: 'string', enum: ['researcher', 'coder', 'tester', 'reviewer'], description: 'Which specialized sub-agent to dispatch to.' },
+        task: { type: 'string', description: 'Clear, self-contained description of the subtask.' },
+      },
+      required: ['profile', 'task'],
+      additionalProperties: false,
+    },
+    permission: { scope: 'project', access: 'read' },
   },
   {
     key: 'browser_open',

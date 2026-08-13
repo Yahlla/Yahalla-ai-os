@@ -242,14 +242,44 @@ content changed. This is genuine "mechanics work end-to-end" proof, not a
 general "always finds the right fix" guarantee — the fake LLM in the test
 scripts one plausible fixed conversation, not a search over strategies.
 
-## Multi-agent — does not exist in the real architecture
+## Real multi-agent orchestration (Phase 5, done, tested)
 
-The "12 specialized agents + orchestrator" concept
-(`supabase/migrations/20260810114233_20260810_yahalla_seed_data.sql`) is
-inert seed data feeding a cosmetic dropdown (`selectedAgent` in
-`src/App.tsx`) in the legacy Supabase Edge-Function chat path only. It has
-zero effect on local-runtime's actual behavior. There is no code anywhere
-that dispatches a sub-task to a differently-configured agent.
+`local-runtime/src/subAgents.ts` + `agentLoop.ts`'s `runSubAgentLoop`/
+`runSubAgent` (covered by `local-runtime/test/subAgents.test.ts`, 5 tests
+against a real /chat round-trip where the same fake LLM server plays both
+the orchestrator and the dispatched sub-agent, distinguished by their
+genuinely different system prompts) replace the old cosmetic "12 agents"
+concept with a real dispatch mechanism:
+
+- A new `dispatch_subagent` tool the top-level agent can call with
+  `{profile, task}`. Four real, differently-restricted worker profiles
+  (`researcher`, `coder`, `tester`, `reviewer`), each with its own system
+  prompt focus, its own tool allowlist, and its own round budget
+  (`SUB_AGENT_PROFILES` in `subAgents.ts`).
+- A dispatched sub-agent runs a genuinely independent, real tool-calling
+  loop against the same local model: its own LLM calls, its own tool
+  execution through the exact same `executeToolNow`/permission checks
+  every top-level tool call goes through (so it can never do more than a
+  real granted permission allows), but the LLM is only ever offered the
+  tools in its profile's allowlist — a tool outside that list is refused
+  before it can execute, proven by a test that dispatches to `tester` with
+  a task that tries to write a file: the write is refused and the file
+  never lands on disk, even though the top-level agent has write access to
+  the same project.
+- The result returned to the orchestrator is real: the sub-agent's own
+  final report plus exactly which tools it actually used and their real
+  results (`tools_used`, `executed_tools`) — not a synthetic summary.
+- Nesting is prevented by construction, not a runtime check that could be
+  forgotten: `dispatch_subagent` is never included in any profile's
+  allowlist, so a sub-agent's LLM is never even offered the tool.
+- Deliberately simpler than the top-level loop where the difference is
+  safe to take: no task/conversation persistence (a sub-agent run isn't a
+  first-class browsable task), no approval-gated pause (there's no human
+  present mid-subtask — an approval-requiring tool is refused outright
+  instead of hanging), no dedup/repeated-failure bookkeeping (the small
+  per-profile round budget bounds a runaway sub-agent regardless).
+- An unknown profile name fails cleanly with a clear error instead of
+  crashing or silently no-op'ing.
 
 ## Browser agent tool (Phase 4, done, tested)
 
@@ -336,18 +366,19 @@ root:               tsc -b clean; vite build succeeds (6 chunks, lib chunk
                      23/23 pass
 packages/agent-tools: typecheck clean; build clean (no test script)
 device-agent:        typecheck clean; build clean (no test script)
-local-runtime:       typecheck clean; build clean; npm test: 108/108 pass,
+local-runtime:       typecheck clean; build clean; npm test: 113/113 pass,
                      confirmed stable across repeated runs (76 baseline +
                      7 from Phase 1 reliability.test.ts + 6 from Phase 2
                      selfDev.test.ts + 7 from Phase 3 projectIndex.test.ts
-                     + 12 from Phase 4 browser.test.ts; needs a reachable
-                     Postgres for databaseIntegration.test.ts's arbitrary-
-                     db-connector tests — fails cleanly and only that
-                     suite if Postgres is absent, everything else passes
-                     regardless; browser.test.ts's live-browser tests need
-                     a real Chrome/Chromium/Edge findable on the machine —
-                     see the browser-tool section below — or they skip
-                     cleanly rather than failing)
+                     + 12 from Phase 4 browser.test.ts + 5 from Phase 5
+                     subAgents.test.ts; needs a reachable Postgres for
+                     databaseIntegration.test.ts's arbitrary-db-connector
+                     tests — fails cleanly and only that suite if Postgres
+                     is absent, everything else passes regardless;
+                     browser.test.ts's live-browser tests need a real
+                     Chrome/Chromium/Edge findable on the machine — see the
+                     browser-tool section below — or they skip cleanly
+                     rather than failing)
 platform/api:        typecheck clean; build clean; npm test: 101/101 pass
                      (needs TEST_DATABASE_URL + schema applied via
                      platform/db/apply.sh)

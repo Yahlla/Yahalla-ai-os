@@ -20,6 +20,7 @@ import {
   selfDevBranchGuardMessage,
   summarizeSelfDevOutcome,
 } from './selfDev.js'
+import { getSubAgentProfile, type SubAgentProfile } from './subAgents.js'
 import { buildOpenAITools, DEFAULT_RUN_COMMAND_ALLOWLIST, getTool, type ToolDef } from './tools.js'
 import { searchMemory, storeMemory } from './vectorMemory.js'
 
@@ -87,6 +88,8 @@ Coding-agent workflow for any request that touches the project. You are autonomo
 Git and GitHub: git_status/git_diff/git_create_branch/git_commit/git_push/github.open_pr are all free to use without asking -- call them directly as part of the workflow above, never ask the user to run a command themselves, and never fabricate a commit hash, repo URL, PR number, or push result. github.write (creating a brand-new repository, not a PR) is the one GitHub action that still requires the user's approval -- the platform enforces this automatically, just call the tool and wait.
 
 Databases: call db_list_connections first if you don't already know a connection's id. db_query is read-only (enforced by the database itself, not just convention) and safe to use freely for inspecting data/schema, debugging, and diagnostics. db_execute runs writes/DDL and requires the user's approval -- call it directly, never ask the user to run SQL themselves, and never fabricate query results or row counts.
+
+Delegation: for a distinct, self-contained piece of work worth handing off rather than doing inline yourself -- e.g. "go research how X currently works" while you keep planning, or "implement this specific change" as its own focused unit -- use dispatch_subagent with the profile that matches (researcher/coder/tester/reviewer). The sub-agent runs its own real bounded tool-calling loop and reports back exactly what it found or did, plus which tools it used; it has no memory of this conversation, so write its task description as a complete, standalone instruction.
 ${perceptionContext ? `\n${perceptionContext}\n` : ''}${memoryContext ? `\n${memoryContext}\n` : ''}
 Be concise and useful. ${languageInstructionLine(detectedLanguage)}
 `.trim()
@@ -134,6 +137,8 @@ function buildPerceptionContext(ctx: RuntimeContext): string {
 
 function summarizeToolCall(tool: ToolDef, args: Record<string, unknown>): string {
   switch (tool.key) {
+    case 'dispatch_subagent':
+      return `Dispatching to the ${args.profile ?? 'sub-agent'}`
     case 'get_project_overview':
       return 'Getting oriented on the project'
     case 'read_project_file':
@@ -261,6 +266,10 @@ async function executeToolNow(
     return browserClose()
   }
 
+  if (tool.category === 'orchestration') {
+    return runSubAgent(ctx, String(args.profile ?? ''), String(args.task ?? ''))
+  }
+
   if (tool.category === 'github') {
     const token = getPreference<string>(ctx.db, 'github_token')
     if (tool.key === 'github.read') return githubRead(token, args)
@@ -279,6 +288,123 @@ async function executeToolNow(
 
   const config = tool.key === 'run_project_command' ? { allowlist: DEFAULT_RUN_COMMAND_ALLOWLIST } : {}
   return executeDeviceTool(tool.key, ctx.projectRoot, args, config)
+}
+
+type SubAgentLoopResult = {
+  success: boolean
+  answer?: string
+  error?: string
+  executedTools: { tool: string; arguments: Record<string, unknown>; result: Record<string, unknown> }[]
+}
+
+// A real, bounded, independent tool-calling loop for a dispatched
+// sub-agent -- its own LLM calls, its own tool execution (through the same
+// executeToolNow/permission checks every top-level tool call goes
+// through, so a sub-agent can never do more than a real granted
+// permission allows), but restricted to exactly profile.allowedToolKeys
+// and never offered dispatch_subagent itself, so nesting is impossible by
+// construction, not by a runtime check that could be forgotten. Deliberately
+// simpler than the top-level runLoop: no task/conversation persistence (a
+// sub-agent run is not a first-class task the user browses), no
+// approval-gated pause (there is no human present mid-subtask to decide --
+// an approval-requiring tool is refused outright instead), no
+// dedup/repeated-failure bookkeeping (the profile's small round budget
+// keeps a runaway sub-agent bounded regardless).
+async function runSubAgentLoop(ctx: RuntimeContext, profile: SubAgentProfile, task: string): Promise<SubAgentLoopResult> {
+  const systemPrompt = `You are a specialized Yahalla AI sub-agent ("${profile.name}") dispatched by an orchestrating agent to handle exactly one bounded subtask -- you have no memory of the orchestrator's conversation, only what is written below. ${profile.focus}
+
+The project you work on is at: ${ctx.projectRoot}
+
+Never guess or invent a fact -- every claim must come from an actual tool result you just received. When you are done, give one clear, concise final report of what you found or did; this is returned directly to the orchestrator, which cannot see your intermediate tool calls.`
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: task },
+  ]
+  const executedTools: SubAgentLoopResult['executedTools'] = []
+  const llmTools = buildOpenAITools().filter((t) => t.function.name !== 'dispatch_subagent' && profile.allowedToolKeys.includes(t.function.name))
+
+  for (let round = 0; round < profile.maxRounds; round++) {
+    ctx.embodiment.transition('THINKING', `[${profile.name}] working on: ${task.slice(0, 80)}`)
+    const result = await chatCompletionWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages, tools: llmTools })
+    if (!result.ok) return { success: false, error: result.errorMessage, executedTools }
+
+    const message = result.data?.choices?.[0]?.message
+    const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : []
+
+    if (toolCalls.length === 0) {
+      const answer: string = message?.content ?? ''
+      if (!answer) return { success: false, error: 'Sub-agent returned no usable answer.', executedTools }
+      return { success: true, answer, executedTools }
+    }
+
+    messages.push({ role: 'assistant', content: message.content ?? null, tool_calls: toolCalls })
+
+    for (const call of toolCalls) {
+      const toolName = call.function?.name
+      const tool = getTool(toolName)
+      let args: Record<string, unknown> = {}
+      let argsParseFailed = false
+      try {
+        args = typeof call.function?.arguments === 'string' ? JSON.parse(call.function.arguments) : (call.function?.arguments ?? {})
+      } catch {
+        argsParseFailed = true
+      }
+
+      if (!tool || !profile.allowedToolKeys.includes(tool.key)) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: toolName,
+          content: JSON.stringify({ success: false, error: `Tool "${toolName}" is not available to the ${profile.name} sub-agent.` }),
+        })
+        continue
+      }
+      if (argsParseFailed) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: tool.key,
+          content: JSON.stringify({ success: false, error: `Arguments for "${tool.key}" were not valid JSON.` }),
+        })
+        continue
+      }
+      if (tool.requiresApproval) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: tool.key,
+          content: JSON.stringify({ success: false, error: `"${tool.key}" requires human approval, which is not available to a dispatched sub-agent. Report this back instead of retrying.` }),
+        })
+        continue
+      }
+
+      const toolResult = await executeToolNow(ctx, tool, args)
+      executedTools.push({ tool: tool.key, arguments: args, result: toolResult })
+      messages.push({ role: 'tool', tool_call_id: call.id, name: tool.key, content: JSON.stringify(toolResult) })
+    }
+  }
+
+  return { success: false, error: `Sub-agent exceeded its round budget (${profile.maxRounds}) without a final answer.`, executedTools }
+}
+
+async function runSubAgent(ctx: RuntimeContext, profileKey: string, task: string): Promise<Record<string, unknown>> {
+  const profile = getSubAgentProfile(profileKey)
+  if (!profile) {
+    return { success: false, error: `Unknown sub-agent profile "${profileKey}". Valid profiles: researcher, coder, tester, reviewer.` }
+  }
+  if (!task.trim()) {
+    return { success: false, error: 'A task description is required to dispatch a sub-agent.' }
+  }
+
+  const result = await runSubAgentLoop(ctx, profile, task)
+  return {
+    success: result.success,
+    profile: profile.key,
+    report: result.success ? result.answer : (result.error ?? 'Sub-agent failed.'),
+    tools_used: result.executedTools.map((t) => t.tool),
+    executed_tools: result.executedTools,
+  }
 }
 
 function getOrCreateConversation(db: Db, conversationId: string | undefined, firstMessage: string): string {
