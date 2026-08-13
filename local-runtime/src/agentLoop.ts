@@ -4,6 +4,7 @@ import type { Db } from './db.js'
 import { newId } from './db.js'
 import type { EmbodimentStateMachine } from './embodiment/stateMachine.js'
 import { githubOpenPr, githubRead, githubWrite } from './github.js'
+import { detectLanguage, languageInstructionLine } from './langDetect.js'
 import { chatCompletion } from './llm.js'
 import { addMemory, getPreference, recordTaskFeedback } from './memory.js'
 import { checkAccess } from './permissions.js'
@@ -64,7 +65,7 @@ Git and GitHub: git_status/git_diff/git_create_branch/git_commit/git_push/github
 
 Databases: call db_list_connections first if you don't already know a connection's id. db_query is read-only (enforced by the database itself, not just convention) and safe to use freely for inspecting data/schema, debugging, and diagnostics. db_execute runs writes/DDL and requires the user's approval -- call it directly, never ask the user to run SQL themselves, and never fabricate query results or row counts.
 ${perceptionContext ? `\n${perceptionContext}\n` : ''}${memoryContext ? `\n${memoryContext}\n` : ''}
-Be concise and useful. Respond in the user's language.
+Be concise and useful. ${languageInstructionLine(detectLanguage(currentMessage))}
 `.trim()
 }
 

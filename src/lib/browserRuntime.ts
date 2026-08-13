@@ -1,5 +1,6 @@
 import type { BrowserChatMessage } from './browserLLM'
 import { browserChatCompletion, getLoadedModelId, isBrowserModelLoaded, isWebGPUSupported, loadBrowserModel, type BrowserLLMProgress } from './browserLLM'
+import { detectLanguage, languageInstructionLine } from './langDetect'
 import type { ChatResponse } from './types'
 
 // The browser-only inference path: no local-runtime process, no Electron,
@@ -20,8 +21,18 @@ import type { ChatResponse } from './types'
 // doesn't. This has actually happened (asked to list tasks, it claimed
 // access to "local, localized data" instead of saying no) -- the explicit
 // examples below exist because of that, not hypothetically.
-const SYSTEM_PROMPT = `
+// The language-matching line used to be missing here entirely (it only
+// existed in the cloud-boost tier's system prompt) -- a real gap, since
+// this is the tier every visitor with no local-runtime and no cloud
+// smart tier falls back to. Built fresh per message now (buildSystemPrompt
+// below) from a real per-message language detection instead of a single
+// static instruction that can't react to the user switching languages
+// mid-conversation.
+function buildSystemPrompt(detectedLanguageLine: string): string {
+  return `
 You are Yahalla AI, running entirely inside the user's own web browser via local, on-device inference (WebGPU) -- not a cloud service, not a chatbot with hidden server-side tools.
+
+${detectedLanguageLine}
 
 What you can do: hold a conversation, answer general questions, explain things, help draft or reason through something the user describes to you directly in the chat.
 
@@ -36,6 +47,7 @@ Hard rules:
 - Never guess or invent facts and present them as verified. If you don't know, say you don't know.
 - Be concise and direct.
 `.trim()
+}
 
 export async function checkBrowserRuntimeAvailable(): Promise<boolean> {
   return isWebGPUSupported()
@@ -54,8 +66,9 @@ export async function sendChatMessage(
   message: string,
   onToken?: (delta: string) => void,
 ): Promise<ChatResponse & { updatedHistory: BrowserChatMessage[] }> {
+  const detectedLanguage = detectLanguage(message)
   const messages: BrowserChatMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: buildSystemPrompt(languageInstructionLine(detectedLanguage)) },
     ...history,
     { role: 'user', content: message },
   ]

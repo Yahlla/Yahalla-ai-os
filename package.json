@@ -11,7 +11,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test test/langDetect.test.ts"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.0.1",
