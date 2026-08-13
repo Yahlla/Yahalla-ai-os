@@ -11,6 +11,7 @@ import * as platformApi from './lib/platformApi'
 import { requestMediaPermission } from './lib/capabilities'
 import { detectLanguage, languageInstructionLine } from './lib/langDetect'
 import { recognizeText } from './lib/ocr'
+import { overlayWatermark } from './lib/imageEditor'
 import { createVoiceRecognizer, isSpeechRecognitionSupported, type VoiceRecognizer } from './lib/voiceInput'
 import * as voiceOutput from './lib/voiceOutput'
 import { createBlinkDetector, isGestureControlSupported, type BlinkDetector } from './lib/gestureControl'
@@ -2098,7 +2099,7 @@ type Artifact = {
   id: string
   title: string
   language: string
-  kind: 'html' | 'svg' | 'markdown' | 'code'
+  kind: 'html' | 'svg' | 'markdown' | 'code' | 'image'
   content: string
 }
 
@@ -2197,17 +2198,21 @@ function renderMarkdownLite(text: string) {
 }
 
 function downloadArtifact(artifact: Artifact): void {
-  const blob = new Blob([artifact.content], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
+  // Image artifacts hold a data: URL (real pixel output from
+  // imageEditor.ts), not text -- everything else is still a plain-text
+  // blob the way it always was.
+  const url =
+    artifact.kind === 'image' ? artifact.content : URL.createObjectURL(new Blob([artifact.content], { type: 'text/plain;charset=utf-8' }))
   const link = document.createElement('a')
   link.href = url
   link.download = artifact.title
   link.click()
-  URL.revokeObjectURL(url)
+  if (artifact.kind !== 'image') URL.revokeObjectURL(url)
 }
 
 function ArtifactsPanel({ artifact, onClose }: { artifact: Artifact; onClose: () => void }) {
   const canPreview = artifact.kind === 'html' || artifact.kind === 'svg'
+  const isImage = artifact.kind === 'image'
   const [view, setView] = useState<'preview' | 'source'>(canPreview ? 'preview' : 'source')
   const [copied, setCopied] = useState(false)
 
@@ -2241,9 +2246,11 @@ function ArtifactsPanel({ artifact, onClose }: { artifact: Artifact; onClose: ()
               <button className={view === 'source' ? 'active' : ''} onClick={() => setView('source')}>Code</button>
             </div>
           )}
-          <button className="icon-button" onClick={copy} title="Copy">
-            {copied ? <Check size={15} /> : <Copy size={15} />}
-          </button>
+          {!isImage && (
+            <button className="icon-button" onClick={copy} title="Copy">
+              {copied ? <Check size={15} /> : <Copy size={15} />}
+            </button>
+          )}
           <button className="icon-button" onClick={() => downloadArtifact(artifact)} title="Download">
             <Download size={15} />
           </button>
@@ -2253,7 +2260,11 @@ function ArtifactsPanel({ artifact, onClose }: { artifact: Artifact; onClose: ()
         </div>
       </div>
       <div className="artifacts-panel-body">
-        {canPreview && view === 'preview' ? (
+        {isImage ? (
+          <div className="artifact-image-view">
+            <img src={artifact.content} alt={artifact.title} />
+          </div>
+        ) : canPreview && view === 'preview' ? (
           <iframe className="artifact-frame" sandbox="allow-scripts" srcDoc={previewDoc} title={artifact.title} />
         ) : artifact.kind === 'markdown' ? (
           <div className="artifact-markdown">{renderMarkdownLite(artifact.content)}</div>
@@ -2392,6 +2403,12 @@ function ChatSection() {
     }
   }, [])
 
+  // Image artifacts (src/lib/imageEditor.ts's local watermark/logo
+  // compositing) don't come from parsing an assistant message's text like
+  // every other artifact kind -- they're real pixel output, attached
+  // directly to whichever message produced them.
+  const [imageArtifactsByMessage, setImageArtifactsByMessage] = useState<Map<string, Artifact[]>>(new Map())
+
   // Fenced code blocks in assistant messages become artifacts, rendered in
   // the side panel instead of inline -- recomputed only when the
   // transcript actually changes, not on every keystroke/render.
@@ -2400,8 +2417,11 @@ function ChatSection() {
     for (const message of messages) {
       if (message.role === 'assistant') map.set(message.id, extractArtifacts(message.id, message.content))
     }
+    for (const [messageId, artifacts] of imageArtifactsByMessage) {
+      map.set(messageId, [...(map.get(messageId) ?? []), ...artifacts])
+    }
     return map
-  }, [messages])
+  }, [messages, imageArtifactsByMessage])
 
   const activeArtifact = useMemo(() => {
     if (!activeArtifactId) return null
@@ -2879,7 +2899,10 @@ function ChatSection() {
       .map((f) => `\n\n--- attached file: ${f.name} ---\n\`\`\`\n${f.content}\n\`\`\``)
       .join('')
     const attachmentsForDisplay = attachedFiles.map((f) => ({ name: f.name, size: f.size }))
-    const capturedImage = pendingImage
+    // Named distinctly from the `capturedImage`/`setCapturedImage` state
+    // above (the live camera-preview frame, a different thing entirely) --
+    // this is specifically "the image this send is about to act on."
+    const imageToSend = pendingImage
 
     if (!voiceText) setInput('')
     setAttachedFiles([])
@@ -2889,6 +2912,61 @@ function ChatSection() {
     setSending(true)
     setThinkingSteps([])
 
+    // A deterministic pixel operation (crop/color/logo overlay) needs no
+    // model reasoning at all, so a real watermark/logo request on an
+    // attached photo short-circuits straight to src/lib/imageEditor.ts --
+    // instant, on-device, and honest about not calling any LLM tier for
+    // something that was never actually a language task. Recognized in
+    // both English and Arabic; anything else attached with an image falls
+    // through to the OCR path below.
+    const WATERMARK_INTENT = /\b(watermark|logo|brand(ing)?|overlay)\b|علامة\s*مائية|شعار|لوجو|ختم/i
+    if (imageToSend && WATERMARK_INTENT.test(typed)) {
+      const userMessageId = crypto.randomUUID()
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: userMessageId,
+          role: 'user',
+          content: typed || 'Add a watermark to this photo.',
+          createdAt: new Date(),
+          imageDataUrl: imageToSend,
+        },
+      ])
+      setThinkingSteps((prev) => [...prev, { state: 'THINKING', summary: 'Composing image…', ts: Date.now() }].slice(-8))
+      try {
+        const branded = await overlayWatermark(imageToSend, `${import.meta.env.BASE_URL}favicon.svg`)
+        const artifact: Artifact = { id: crypto.randomUUID(), title: 'branded-image.png', language: 'image', kind: 'image', content: branded }
+        const replyId = crypto.randomUUID()
+        setImageArtifactsByMessage((prev) => new Map(prev).set(replyId, [artifact]))
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: replyId,
+            role: 'assistant',
+            content: 'Added a watermark, entirely on this device -- see the image in the panel.',
+            createdAt: new Date(),
+            agent: 'yahalla-core',
+          },
+        ])
+        setActiveArtifactId(artifact.id)
+      } catch (error) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: `Could not composite the image locally: ${error instanceof Error ? error.message : 'unknown error'}.`,
+            createdAt: new Date(),
+            agent: 'yahalla-core',
+            error: true,
+          },
+        ])
+      } finally {
+        setSending(false)
+      }
+      return
+    }
+
     // Real local OCR (Tesseract.js, src/lib/ocr.ts) on any attached/
     // captured image -- entirely on-device, the image and its extracted
     // text never leave this browser tab. Still an honest boundary: this
@@ -2896,10 +2974,10 @@ function ChatSection() {
     // with no legible text still gets a plain "no text found" note
     // rather than the model guessing at what the image shows.
     let imageContext = ''
-    if (capturedImage) {
+    if (imageToSend) {
       setThinkingSteps((prev) => [...prev, { state: 'THINKING', summary: 'Reading document…', ts: Date.now() }].slice(-8))
       try {
-        const ocrResult = await recognizeText(capturedImage, typed)
+        const ocrResult = await recognizeText(imageToSend, typed)
         imageContext = ocrResult.text
           ? `\n\n[Text extracted locally (OCR) from the attached photo:]\n${ocrResult.text}`
           : '\n\n[User attached a photo. Local OCR found no legible text in it -- this build has no vision-description model, so only text extraction is possible, not a description of the image.]'
@@ -2908,7 +2986,7 @@ function ChatSection() {
       }
     }
 
-    const message = (typed || `(${attachedFiles.length + (capturedImage ? 1 : 0)} attachment(s), no message)`) + fileContext + imageContext
+    const message = (typed || `(${attachedFiles.length + (imageToSend ? 1 : 0)} attachment(s), no message)`) + fileContext + imageContext
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -2916,7 +2994,7 @@ function ChatSection() {
       content: message,
       createdAt: new Date(),
       attachments: attachmentsForDisplay.length > 0 ? attachmentsForDisplay : undefined,
-      imageDataUrl: capturedImage ?? undefined,
+      imageDataUrl: imageToSend ?? undefined,
     }
 
     setMessages((prev) => [...prev, userMessage])
