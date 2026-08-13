@@ -12,7 +12,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "node --test test/langDetect.test.ts"
+    "test": "node --test test/langDetect.test.ts test/capabilities.test.ts"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.0.1",

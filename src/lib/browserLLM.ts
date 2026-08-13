@@ -9,18 +9,25 @@
 // browser without WebGPU, or a first paint before we know whether to use
 // it, never pays for it.
 
+import { detectHardwareTier, type HardwareTier } from './capabilities'
+
 export type BrowserLLMProgress = { progress: number; text: string }
 
 export function isWebGPUSupported(): boolean {
   return typeof navigator !== 'undefined' && 'gpu' in navigator
 }
 
-// Rough phone vs. desktop signal: real device capability (RAM/thermals)
-// varies a lot more than this, but it is a safe, dependency-free default
-// -- err toward the smaller model rather than risk an OOM/hang on a phone.
-function isLikelyPhone(): boolean {
-  if (typeof navigator === 'undefined') return false
-  return /iphone|ipad|android|mobile/i.test(navigator.userAgent)
+// Real capability-based ceiling (navigator.deviceMemory/hardwareConcurrency,
+// see capabilities.ts's detectHardwareTier -- falls back to a UA phone/
+// desktop guess only for whichever signal this browser doesn't expose),
+// not a bare UA-string guess. A weak device (low RAM/cores, most low-end
+// phones) gets the smaller ceiling that used to apply to every phone
+// regardless of its actual specs; a strong one (most desktops, high-end
+// phones) gets the larger one.
+function vramCeilingMB(tier: HardwareTier): number {
+  if (tier === 'weak') return 1500
+  if (tier === 'strong') return 3200
+  return 2000
 }
 
 async function pickModelId(): Promise<string> {
@@ -43,7 +50,7 @@ async function pickModelId(): Promise<string> {
   // a meaningfully more capable and coherent model -- not just larger.
   // Users who want the strongest fully-local model should still run
   // local-runtime (up to 7B, no browser download at all).
-  const ceilingMB = isLikelyPhone() ? 2000 : 3200
+  const ceilingMB = vramCeilingMB(detectHardwareTier().tier)
   const withinBudget = candidates.filter((m) => (m.vram_required_MB ?? 0) <= ceilingMB)
   const picked = withinBudget[0] ?? candidates[candidates.length - 1]
   if (!picked) throw new Error('No compatible local model found in the WebLLM catalog.')

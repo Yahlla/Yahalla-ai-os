@@ -6,12 +6,60 @@
 
 export type Availability = 'available' | 'unavailable' | 'unknown'
 
+// weak/mid/strong drives which local model size (and, once the WASM
+// fallback engine exists, which engine) a device gets -- real signal
+// where the browser exposes it, not a UA-string guess. `deviceMemory` is
+// Chrome/Edge/Android-only (Safari and Firefox never expose it, capped at
+// 8 by spec even above that) and `hardwareConcurrency` is broadly
+// supported but reports logical cores, not real single-core throughput --
+// both are still meaningfully better than sniffing "iphone|android" out
+// of the user agent string, which says nothing about the specific
+// device's actual RAM/CPU.
+export type HardwareTier = 'weak' | 'mid' | 'strong'
+
 export type BrowserCapabilities = {
   camera: Availability
   microphone: Availability
   webgpu: Availability
   platform: string
   userAgent: string
+  deviceMemoryGB: number | null
+  cpuCores: number | null
+  tier: HardwareTier
+}
+
+function isLikelyPhoneUA(): boolean {
+  return typeof navigator !== 'undefined' && /iphone|ipad|android|mobile/i.test(navigator.userAgent)
+}
+
+// Falls back to the UA phone/desktop guess only for whichever of
+// deviceMemory/cpuCores this browser doesn't expose -- never silently
+// assumes "strong" just because a real number wasn't available. Exported
+// as a pure function (real numbers in, tier out, no navigator access) so
+// the tier boundaries themselves are directly unit-testable without
+// needing to mock global navigator.
+export function computeTier(deviceMemoryGB: number | null, cpuCores: number | null): HardwareTier {
+  const memory = deviceMemoryGB ?? (isLikelyPhoneUA() ? 3 : 8)
+  const cores = cpuCores ?? (isLikelyPhoneUA() ? 4 : 8)
+
+  if (memory <= 2 || cores <= 2) return 'weak'
+  if (memory >= 8 && cores >= 8) return 'strong'
+  return 'mid'
+}
+
+// Synchronous and side-effect-free (no media permission prompts, no
+// enumerateDevices call) -- this is the one meant to sit on the hot path
+// of picking a model size (browserLLM.ts), which has no reason to touch
+// camera/microphone APIs at all.
+export function detectHardwareTier(): { tier: HardwareTier; deviceMemoryGB: number | null; cpuCores: number | null } {
+  const deviceMemoryGB: number | null =
+    typeof navigator !== 'undefined' && typeof (navigator as { deviceMemory?: number }).deviceMemory === 'number'
+      ? (navigator as { deviceMemory?: number }).deviceMemory!
+      : null
+  const cpuCores: number | null =
+    typeof navigator !== 'undefined' && typeof navigator.hardwareConcurrency === 'number' ? navigator.hardwareConcurrency : null
+
+  return { tier: computeTier(deviceMemoryGB, cpuCores), deviceMemoryGB, cpuCores }
 }
 
 export async function detectBrowserCapabilities(): Promise<BrowserCapabilities> {
@@ -32,12 +80,17 @@ export async function detectBrowserCapabilities(): Promise<BrowserCapabilities> 
   const webgpu: Availability =
     typeof navigator !== 'undefined' && 'gpu' in navigator ? 'available' : 'unavailable'
 
+  const hardware = detectHardwareTier()
+
   return {
     camera,
     microphone,
     webgpu,
     platform: typeof navigator !== 'undefined' ? navigator.platform : 'unknown',
     userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+    deviceMemoryGB: hardware.deviceMemoryGB,
+    cpuCores: hardware.cpuCores,
+    tier: hardware.tier,
   }
 }
 
