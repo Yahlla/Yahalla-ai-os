@@ -7,9 +7,17 @@ import { githubOpenPr, githubRead, githubWrite } from './github.js'
 import { diagnoseCommandFailure, signatureForToolFailure, sortKeys } from './diagnostics.js'
 import { detectLanguage, languageInstructionLine } from './langDetect.js'
 import { chatCompletion, chatCompletionStreamWithRetry, chatCompletionWithRetry } from './llm.js'
-import { addMemory, getPreference, recordTaskFeedback } from './memory.js'
+import { addKnowledge, addMemory, getPreference, recordTaskFeedback } from './memory.js'
 import { checkAccess } from './permissions.js'
 import type { WorldModel } from './perception/worldModel.js'
+import {
+  isOnProtectedBranch,
+  isSelfDevProject,
+  SELF_DEV_MUTATING_TOOLS,
+  SELF_DEV_SYSTEM_PROMPT_ADDENDUM,
+  selfDevBranchGuardMessage,
+  summarizeSelfDevOutcome,
+} from './selfDev.js'
 import { buildOpenAITools, DEFAULT_RUN_COMMAND_ALLOWLIST, getTool, type ToolDef } from './tools.js'
 import { searchMemory, storeMemory } from './vectorMemory.js'
 
@@ -60,8 +68,10 @@ async function buildSystemPrompt(projectRoot: string, ctx: RuntimeContext, curre
 
   const perceptionContext = buildPerceptionContext(ctx)
   const memoryContext = await buildMemoryContext(ctx, currentMessage)
+  const selfDevContext = isSelfDevProject(projectRoot) ? `\n${SELF_DEV_SYSTEM_PROMPT_ADDENDUM}\n` : ''
   return `
 You are Yahalla AI, a real local coding agent running entirely on this device -- not a chatbot that talks about code. The project you work on is at: ${projectRoot}
+${selfDevContext}
 
 Evidence and verification -- hard rules:
 - Never guess or invent any fact about the project (file contents, versions, config, git state, test results). Every claim about the project must come from an actual tool result you just received.
@@ -214,6 +224,15 @@ async function executeToolNow(
       success: false,
       error: `Permission denied: this tool needs "${tool.permission.access}" access to "${tool.permission.scope}", which has not been granted. Grant it in Settings > Permissions.`,
     }
+  }
+
+  // Self-development safety rail: when the project being modified is
+  // Yahalla's own source, mutating tools are blocked outright while the
+  // working tree sits on a protected branch. Checked here (not just asked
+  // for in the system prompt) so it holds even if the model ignores the
+  // instruction -- real git state, read fresh, not a cached assumption.
+  if (SELF_DEV_MUTATING_TOOLS.has(tool.key) && isSelfDevProject(ctx.projectRoot) && isOnProtectedBranch(ctx.projectRoot)) {
+    return { success: false, error: selfDevBranchGuardMessage(tool.key) }
   }
 
   if (tool.category === 'github') {
@@ -539,6 +558,22 @@ export async function runChat(
   // write never fails the chat it came from.
   if (chatResult.status === 'completed' && (chatResult.executedTools?.length ?? 0) > 0) {
     void storeMemory({ platformApiUrl: ctx.platformApiUrl, deviceToken: ctx.deviceToken }, summarizeForMemory(message, chatResult), 'agent')
+  }
+
+  // Self-development change record: once a self-dev task actually commits
+  // something, persist a durable "what changed and why" entry independent
+  // of chat history -- this is what lets a later Yahalla session (or a
+  // human) see the real history of self-modifications without re-reading
+  // every conversation.
+  if (
+    chatResult.status === 'completed' &&
+    isSelfDevProject(ctx.projectRoot) &&
+    (chatResult.executedTools ?? []).some((t) => t.tool === 'git_commit' && t.result.success)
+  ) {
+    addKnowledge(ctx.db, `Self-dev: ${message.slice(0, 80)}`, summarizeSelfDevOutcome(message, chatResult.executedTools ?? []), {
+      sourceType: 'self_dev',
+      tags: ['self_dev'],
+    })
   }
 
   // Honest bookkeeping, not fine-grained per-subtask tracking the loop

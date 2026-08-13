@@ -143,6 +143,55 @@ never contains.
     / `timeout` / `unknown`) and extracts a likely `file`/`line` from the
     output, without replacing the raw `stdout`/`stderr` the model already saw.
 
+## Self-development (Phase 2, done, tested)
+
+Yahalla can now develop on its own repository through the exact same
+generic coding-agent mechanism it uses on any other project — `projectRoot`
+was already a configurable value (`local-runtime --project=<path>`, or
+`config.projectRoot` in `~/.yahalla/runtime/config.json`), so pointing a
+running local-runtime at a checkout of `yahalla-ai-os` itself already works
+mechanically. What Phase 2 adds is the safety rail and change record that
+make doing so safe and auditable, in `local-runtime/src/selfDev.ts`
+(covered by `local-runtime/test/selfDev.test.ts`, 6 tests, real git repos
+and a real HTTP `/chat` round-trip, no stubs):
+
+- **Detection** (`isSelfDevProject`): a real, verifiable check — true only
+  when `<projectRoot>/local-runtime/package.json` exists and its `name` is
+  exactly `@yahalla/local-runtime`. Never a directory-name guess.
+- **Branch guard, enforced in code, not just prompted**: when
+  `isSelfDevProject` is true, `write_project_file`, `patch_project_file`,
+  `git_commit`, and `git_push` are refused outright
+  (`agentLoop.ts`'s `executeToolNow`) while the real current git branch
+  (`currentGitBranch`, read fresh via `git rev-parse --abbrev-ref HEAD` on
+  every check, never cached) is `main` or `master`. The model is told to
+  call `git_create_branch` first; if it doesn't, the tool call itself fails
+  with a clear error instead of silently writing to the default branch.
+- **System prompt addendum**: only injected when self-dev is detected —
+  reiterates the branch rule, asks for small verifiable changes, requires
+  running the changed package's real test suite before considering a task
+  done, and warns that a change to already-loaded source needs a process
+  restart to take effect (it does not claim a change is "live" just
+  because a file was written).
+- **Change record**: once a self-dev task's `git_commit` actually succeeds,
+  `runChat` persists a `knowledge` row (`source_type: 'self_dev'`,
+  via the existing `addKnowledge`/`/knowledge` mechanism — no new storage
+  subsystem) summarizing the goal, branch, files touched, commit/push
+  status, and which verification commands ran and whether they passed
+  (`summarizeSelfDevOutcome`). This is the durable "what changed and why"
+  record a later Yahalla session (or a human) can read back.
+- **What this does not do**: it does not auto-merge, auto-open a PR, or
+  auto-restart the running process — opening a PR still goes through the
+  existing `github.open_pr` tool and step 9 of the normal coding-agent
+  workflow, and a human still reviews/merges. There is no scheduler or
+  trigger that makes Yahalla start a self-dev task on its own; a human (or
+  a future Routine) still has to send the initial message. That is the
+  intended bound on autonomy here — "no uncontrolled self-modification."
+- **How to actually use it**: run local-runtime with `--project=<path to a
+  yahalla-ai-os checkout>` (a *separate* clone from the one currently
+  running the server is the safe way to do this, so a self-dev change
+  can't corrupt the very process applying it mid-task), then send it a
+  development goal through `/chat` as normal.
+
 ## Self-repair (existing, single-cycle)
 
 `local-runtime/test/repair-loop.test.ts` proves one real cycle: a real
@@ -200,12 +249,13 @@ root:               tsc -b clean; vite build succeeds (6 chunks, lib chunk
                      23/23 pass
 packages/agent-tools: typecheck clean; build clean (no test script)
 device-agent:        typecheck clean; build clean (no test script)
-local-runtime:       typecheck clean; build clean; npm test: 83/83 pass
-                     (76 baseline + 7 added by Phase 1 reliability work,
-                     see reliability.test.ts; needs a reachable Postgres for
-                     databaseIntegration.test.ts's arbitrary-db-connector
-                     tests — fails cleanly and only that suite if Postgres
-                     is absent, everything else passes regardless)
+local-runtime:       typecheck clean; build clean; npm test: 89/89 pass
+                     (76 baseline + 7 from Phase 1 reliability.test.ts + 6
+                     from Phase 2 selfDev.test.ts; needs a reachable
+                     Postgres for databaseIntegration.test.ts's arbitrary-
+                     db-connector tests — fails cleanly and only that suite
+                     if Postgres is absent, everything else passes
+                     regardless)
 platform/api:        typecheck clean; build clean; npm test: 101/101 pass
                      (needs TEST_DATABASE_URL + schema applied via
                      platform/db/apply.sh)
