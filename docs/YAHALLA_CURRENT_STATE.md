@@ -192,6 +192,45 @@ and a real HTTP `/chat` round-trip, no stubs):
   can't corrupt the very process applying it mid-task), then send it a
   development goal through `/chat` as normal.
 
+## Local project understanding (Phase 3, done, tested)
+
+`local-runtime/src/projectIndex.ts` (covered by
+`local-runtime/test/projectIndex.test.ts`, 7 tests against real fixture
+directories and real git repos) adds a `get_project_overview` tool
+(`tools.ts`) so the agent can get oriented on a project in one call instead
+of several rounds of `list_project_files`/`read_project_file` guessing:
+
+- A single real filesystem walk (excluding `.git`, `node_modules`, `dist`,
+  `build`, and similar generated/vendor directories) that reports a
+  language/file-type breakdown by extension, every `package.json` found up
+  to 4 directories deep (name, version, real `scripts`/`dependencies`/
+  `devDependencies` keys, monorepo-aware — not just the root one), a list
+  of recognized config files present (`tsconfig.json`, `vite.config.*`,
+  `docker-compose.yml`, `Dockerfile`, etc.), and the top-level directory
+  layout.
+- Real git state via `git rev-parse`/`git log`/`git remote`/`git status`
+  (branch, latest commit, remote URL, and whether the working tree is
+  dirty) — not a guess, and correctly distinguishing "clean" (empty
+  `git status --porcelain` output) from "not a git repo at all" (both are
+  real, different states, previously conflated by a bug caught by this
+  phase's own tests: `output.trim() || null` collapsed a clean repo's
+  legitimately-empty status into the same `null` used for a failed git
+  call — fixed by giving status its own boolean-returning helper instead
+  of reusing the string-or-null convention that only fits branch/commit/
+  remote).
+- No embeddings, no network call, nothing sent anywhere — this is exactly
+  the kind of project understanding the local-runtime tier can offer that
+  the browser/cloud tiers cannot.
+- In-memory cached per project root with a 5-minute TTL (not persisted to
+  disk — a hot-path performance cache, not a record); the tool accepts
+  `refresh: true` to force a fresh scan, meant for right after the agent
+  itself has just written several files.
+- `read_project_file`/`list_project_files` remain the only source of truth
+  for a file's exact content — the overview is a summary layer on top, and
+  the coding-agent workflow in the system prompt now points the model at
+  `get_project_overview` first, before falling back to the finer-grained
+  tools for anything the overview doesn't cover.
+
 ## Self-repair (existing, single-cycle)
 
 `local-runtime/test/repair-loop.test.ts` proves one real cycle: a real
@@ -249,13 +288,13 @@ root:               tsc -b clean; vite build succeeds (6 chunks, lib chunk
                      23/23 pass
 packages/agent-tools: typecheck clean; build clean (no test script)
 device-agent:        typecheck clean; build clean (no test script)
-local-runtime:       typecheck clean; build clean; npm test: 89/89 pass
+local-runtime:       typecheck clean; build clean; npm test: 96/96 pass
                      (76 baseline + 7 from Phase 1 reliability.test.ts + 6
-                     from Phase 2 selfDev.test.ts; needs a reachable
-                     Postgres for databaseIntegration.test.ts's arbitrary-
-                     db-connector tests — fails cleanly and only that suite
-                     if Postgres is absent, everything else passes
-                     regardless)
+                     from Phase 2 selfDev.test.ts + 7 from Phase 3
+                     projectIndex.test.ts; needs a reachable Postgres for
+                     databaseIntegration.test.ts's arbitrary-db-connector
+                     tests — fails cleanly and only that suite if Postgres
+                     is absent, everything else passes regardless)
 platform/api:        typecheck clean; build clean; npm test: 101/101 pass
                      (needs TEST_DATABASE_URL + schema applied via
                      platform/db/apply.sh)

@@ -24,6 +24,18 @@ export const TOOLS: ToolDef[] = [
     permission: { scope: 'project', access: 'read' },
   },
   {
+    key: 'get_project_overview',
+    category: 'files',
+    requiresApproval: false,
+    description: 'Get a structured overview of the project: language/file-type counts, every detected package.json (name, scripts, dependencies), config files present, top-level layout, and real git state (branch, latest commit, whether the working tree is dirty). Cached briefly for speed -- pass refresh=true right after making several file changes to force a fresh scan. Read-only, and a summary only -- use read_project_file for a file\'s exact content.',
+    parameters: {
+      type: 'object',
+      properties: { refresh: { type: 'boolean', description: 'Force a fresh scan instead of the cached overview.' } },
+      additionalProperties: false,
+    },
+    permission: { scope: 'project', access: 'read' },
+  },
+  {
     key: 'list_project_files',
     category: 'files',
     requiresApproval: false,

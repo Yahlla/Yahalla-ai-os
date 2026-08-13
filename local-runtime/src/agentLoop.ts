@@ -10,6 +10,7 @@ import { chatCompletion, chatCompletionStreamWithRetry, chatCompletionWithRetry 
 import { addKnowledge, addMemory, getPreference, recordTaskFeedback } from './memory.js'
 import { checkAccess } from './permissions.js'
 import type { WorldModel } from './perception/worldModel.js'
+import { getProjectIndex } from './projectIndex.js'
 import {
   isOnProtectedBranch,
   isSelfDevProject,
@@ -80,7 +81,7 @@ Evidence and verification -- hard rules:
 - Never say a task is done, fixed, or succeeded without a tool result that actually proves it. A file write is not "done" until you have read it back or diffed it; a fix is not "done" until the relevant test/build command has actually been run and passed.
 
 Coding-agent workflow for any request that touches the project. You are autonomous through this entire sequence -- no step here pauses for approval, so work it end-to-end without asking the user to confirm each action:
-1. Analyze the request. 2. Inspect the project for real (list_project_files / read_project_file) before assuming anything. 3. Plan the change -- for anything non-trivial, create a branch first (git_create_branch). 4. Execute it (write_project_file / patch_project_file) -- old_text must be copied verbatim from a read you just did. 5. Verify by reading the file back or using git_diff. 6. Run the relevant test/build command (run_project_command) when one applies. 7. If it fails, diagnose the real output, fix it, and re-run the same command. Repeat until it passes or you have a concrete, evidence-based reason it cannot. 8. Commit (git_commit) and push (git_push) the branch. 9. Open a pull request (github.open_pr) describing what changed, why, and what you verified -- this PR is the human's review checkpoint, not a request for permission first. 10. Report the outcome and the PR link, citing what you actually verified.
+1. Analyze the request. 2. Inspect the project for real -- call get_project_overview first to get oriented cheaply (languages, detected packages/scripts, config files, git state), then list_project_files / read_project_file for anything the overview doesn't cover -- before assuming anything. 3. Plan the change -- for anything non-trivial, create a branch first (git_create_branch). 4. Execute it (write_project_file / patch_project_file) -- old_text must be copied verbatim from a read you just did. 5. Verify by reading the file back or using git_diff. 6. Run the relevant test/build command (run_project_command) when one applies. 7. If it fails, diagnose the real output, fix it, and re-run the same command. Repeat until it passes or you have a concrete, evidence-based reason it cannot. 8. Commit (git_commit) and push (git_push) the branch. 9. Open a pull request (github.open_pr) describing what changed, why, and what you verified -- this PR is the human's review checkpoint, not a request for permission first. 10. Report the outcome and the PR link, citing what you actually verified.
 
 Git and GitHub: git_status/git_diff/git_create_branch/git_commit/git_push/github.open_pr are all free to use without asking -- call them directly as part of the workflow above, never ask the user to run a command themselves, and never fabricate a commit hash, repo URL, PR number, or push result. github.write (creating a brand-new repository, not a PR) is the one GitHub action that still requires the user's approval -- the platform enforces this automatically, just call the tool and wait.
 
@@ -132,6 +133,8 @@ function buildPerceptionContext(ctx: RuntimeContext): string {
 
 function summarizeToolCall(tool: ToolDef, args: Record<string, unknown>): string {
   switch (tool.key) {
+    case 'get_project_overview':
+      return 'Getting oriented on the project'
     case 'read_project_file':
       return `Reading ${args.path ?? 'a file'}`
     case 'list_project_files':
@@ -233,6 +236,10 @@ async function executeToolNow(
   // instruction -- real git state, read fresh, not a cached assumption.
   if (SELF_DEV_MUTATING_TOOLS.has(tool.key) && isSelfDevProject(ctx.projectRoot) && isOnProtectedBranch(ctx.projectRoot)) {
     return { success: false, error: selfDevBranchGuardMessage(tool.key) }
+  }
+
+  if (tool.key === 'get_project_overview') {
+    return { success: true, overview: getProjectIndex(ctx.projectRoot, { forceRefresh: args.refresh === true }) }
   }
 
   if (tool.category === 'github') {
