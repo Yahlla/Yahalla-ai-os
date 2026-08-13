@@ -26,6 +26,18 @@ export type PerceptionCapabilityHint = {
   detectVia: 'frontend (navigator.mediaDevices / navigator.gpu) or a future native platform module'
 }
 
+// Pure, dependency-free tiering rule, factored out of detectHardware() so
+// the boundary logic itself is directly unit-testable without needing to
+// mock node:os. Deliberately conservative: BOTH memory and core count must
+// clear a tier's floor, not either alone -- a high-core, low-RAM machine
+// (or the reverse) is exactly the case a real local LLM (RAM-bound, not
+// just compute-bound) would choke on if only one dimension were checked.
+export function computeRecommendedTier(totalMemoryGb: number, cpuCores: number): HardwareInfo['recommendedTier'] {
+  if (totalMemoryGb >= 32 && cpuCores >= 8) return 'large'
+  if (totalMemoryGb >= 16 && cpuCores >= 4) return 'medium'
+  return 'small'
+}
+
 // Best-effort, dependency-free hardware read. GPU detection is
 // intentionally not attempted here: there is no portable, dependency-free
 // way to query GPU VRAM across macOS/Windows/Linux from Node without
@@ -37,13 +49,7 @@ export function detectHardware(): HardwareInfo {
   const cpuList = cpus()
   const totalMemoryBytes = totalmem()
   const totalMemoryGb = totalMemoryBytes / 1024 ** 3
-
-  let recommendedTier: HardwareInfo['recommendedTier'] = 'small'
-  if (totalMemoryGb >= 32 && cpuList.length >= 8) {
-    recommendedTier = 'large'
-  } else if (totalMemoryGb >= 16 && cpuList.length >= 4) {
-    recommendedTier = 'medium'
-  }
+  const recommendedTier = computeRecommendedTier(totalMemoryGb, cpuList.length)
 
   return {
     platform: platform(),

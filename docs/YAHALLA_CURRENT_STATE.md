@@ -530,6 +530,47 @@ explicit audit before writing any code:
   failure) — not mocked fetch, a real server receiving real requests in
   the right order with the right bodies.
 
+## Weak-hardware capability selection (Phase 8, audited — mostly already real+wired, one test gap closed)
+
+Real hardware-tier detection already existed from earlier work on both
+sides and was already wired in, not dead code (worth stating plainly since
+an earlier planning note in this project's history had flagged
+`capabilities.ts`'s tier detector as unwired — that was true at the time
+it was written and is no longer true):
+
+- Browser tier: `src/lib/capabilities.ts`'s `detectHardwareTier()`
+  (`navigator.deviceMemory`/`navigator.hardwareConcurrency`) is imported
+  and used by both `src/lib/browserLLM.ts` (WebGPU VRAM ceiling →
+  model choice) and `src/lib/wasmLLM.ts` (small vs. medium GGUF for the
+  WASM fallback engine) — confirmed by grep, not assumed. Covered by
+  `test/capabilities.test.ts`.
+- local-runtime tier: `hardware.ts`'s CPU/RAM tiering feeds
+  `modelManager.ts`'s `recommendCatalogEntry()`, which Phase 7's
+  `ensureModelReady()` now calls for the desktop app's automatic first-run
+  model selection. **Real gap found and closed**: this tiering logic had
+  zero dedicated tests anywhere in `local-runtime/test/` despite Phase 7
+  now depending on it for correctness. Fixed: the boundary rule was
+  factored into a pure `computeRecommendedTier(totalMemoryGb, cpuCores)`
+  (both dimensions must clear a tier's floor — a high-core/low-RAM or the
+  reverse machine never gets over-recommended, since a local LLM is
+  RAM-bound, not just compute-bound) and covered by 7 new tests in
+  `local-runtime/test/hardwareTiering.test.ts`, including an explicit
+  assertion that a weak device's recommended catalog entry is never larger
+  than its tier. local-runtime suite now 128/128.
+- GPU/NPU detection from the local-runtime (Node) process is honestly
+  reported as unavailable (`hardware.ts`'s `perception.gpuDetectable:
+  false`), not guessed — there is no portable, dependency-free way to
+  query GPU VRAM across macOS/Windows/Linux from plain Node. The browser
+  side's `navigator.gpu`/WebGPU check is the real GPU signal this project
+  actually has, and it is what both `browserLLM.ts` and `wasmLLM.ts` key
+  off already.
+- Maximizing capability through tools rather than model size alone: this
+  is what Phases 1–5 collectively are — `get_project_overview`,
+  `dispatch_subagent`, `browser_*`, and structured diagnosis all give even
+  the smallest catalog model (Qwen2.5 1.5B) real leverage a bare small
+  model would not have on its own, rather than trying to compensate for
+  weak hardware with a bigger model.
+
 ## Strato / external dependency facts (grep-verified, see prior full audit)
 
 - No hardcoded Strato hostname/IP/secret exists anywhere in source; no
