@@ -2367,6 +2367,11 @@ function ChatSection() {
   const [runtimeTier, setRuntimeTier] = useState<'local' | 'local-unpaired' | 'browser' | 'cloud' | 'device' | null>(null)
   const [connectingLocalRuntime, setConnectingLocalRuntime] = useState(false)
   const [localConnectError, setLocalConnectError] = useState('')
+  // Electron-only: friendly, non-technical first-run status. Undefined
+  // outside the desktop app (window.yahallaDesktop absent) -- no banner
+  // is ever shown for the plain web tab, which has no such setup step.
+  const [desktopModelStatus, setDesktopModelStatus] = useState<localRuntime.ModelSetupStatus | null>(null)
+  const [desktopRuntimeStatus, setDesktopRuntimeStatus] = useState<localRuntime.RuntimeProcessStatus | null>(null)
   // Explicit, user-toggled escalation to the opt-in cloud smart tier (see
   // platform/api/src/cloudTier.ts) -- distinct from runtimeTier's 'cloud',
   // which is the legacy last-resort fallback when no on-device path exists
@@ -2625,6 +2630,29 @@ function ChatSection() {
       setConnectingLocalRuntime(false)
     }
   }
+
+  // Electron desktop app only: first-run model setup + runtime-process
+  // lifecycle, reported by main.cjs over IPC (see preload.cjs). Absent
+  // entirely for the plain web tab -- window.yahallaDesktop simply won't
+  // exist there, and both subscribers are no-ops.
+  useEffect(() => {
+    const offModel = window.yahallaDesktop?.onModelStatus((status) => {
+      setDesktopModelStatus(status)
+      if (status.phase === 'ready') {
+        // Local-runtime just gained a real active model -- re-check which
+        // tier should actually answer the next message instead of waiting
+        // for the next natural re-render trigger.
+        localRuntime.checkRuntimeHealth().then((health) => {
+          if (health?.llm_reachable) setRuntimeTier('local')
+        })
+      }
+    })
+    const offRuntime = window.yahallaDesktop?.onRuntimeStatus(setDesktopRuntimeStatus)
+    return () => {
+      offModel?.()
+      offRuntime?.()
+    }
+  }, [])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -3446,8 +3474,33 @@ function ChatSection() {
     }
   }
 
+  // Friendly, non-technical first-run/status copy for the desktop app --
+  // never raw log lines like "Checking CPU" or "Downloading model.gguf".
+  // Chat itself is never blocked while this shows (browser tier still
+  // works), so this is an informational strip, not a gate.
+  function desktopStatusBanner(): string | null {
+    if (desktopRuntimeStatus?.status === 'restarting') return "Yahalla's local engine is restarting -- one moment…"
+    if (desktopRuntimeStatus?.status === 'failed') return "Yahalla's local engine needs a restart -- please reopen the app."
+    switch (desktopModelStatus?.phase) {
+      case 'checking':
+        return 'Getting Yahalla ready for you…'
+      case 'downloading':
+        return 'Setting up Yahalla\'s local AI (first time only) -- you can keep chatting while this finishes.'
+      case 'starting_engine':
+        return 'Almost ready…'
+      case 'engine-missing':
+        return "Yahalla's local AI engine isn't installed yet -- you can still chat now, in browser mode."
+      case 'error':
+        return 'Getting the local AI ready hit a snag -- you can still chat now, in browser mode.'
+      default:
+        return null
+    }
+  }
+  const statusBanner = desktopStatusBanner()
+
   return (
     <div className="chat-page">
+      {statusBanner && <div className="desktop-status-banner">{statusBanner}</div>}
       <div className="chat-header">
         <div className="chat-agent">
           <div className="agent-avatar living-avatar" title="Yahalla Core -- live">

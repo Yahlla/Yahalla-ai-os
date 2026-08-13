@@ -26,10 +26,20 @@ import type { ChatResponse } from './types'
 //    a developer copies out of ~/.yahalla/runtime/config.json once. Not a
 //    production security boundary -- the Electron bridge and the pairing
 //    flow are.
+export type RuntimeProcessStatus = { status: 'starting' | 'restarting' | 'failed'; reason?: string }
+export type ModelSetupStatus =
+  | { phase: 'checking' | 'starting_engine' | 'ready' | 'engine-missing' }
+  | { phase: 'downloading'; modelName: string }
+  | { phase: 'error'; error: string }
+
 declare global {
   interface Window {
     yahallaDesktop?: {
       getRuntimeInfo: () => Promise<{ baseUrl: string; authToken: string } | null>
+      // Both return an unsubscribe function -- Electron-only (main.cjs);
+      // absent entirely in a plain browser tab, same as getRuntimeInfo.
+      onRuntimeStatus: (callback: (status: RuntimeProcessStatus) => void) => () => void
+      onModelStatus: (callback: (status: ModelSetupStatus) => void) => () => void
     }
   }
 }

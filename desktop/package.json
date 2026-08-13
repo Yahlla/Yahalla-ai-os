@@ -7,7 +7,8 @@
   "scripts": {
     "stage": "node scripts/stage-resources.mjs",
     "electron:dev": "npm run stage && electron .",
-    "electron:build": "npm run stage && electron-builder"
+    "electron:build": "npm run stage && electron-builder",
+    "test": "node --test test/*.test.cjs"
   },
   "devDependencies": {
     "electron": "^33.0.0",

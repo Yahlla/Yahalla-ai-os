@@ -433,6 +433,103 @@ multi-step task, not a browser page the user opens themselves:
   GitHub server at 18100) to a free port -- confirmed stable across
   repeated full-suite runs.
 
+## Voice/camera (Phase 6, done+tested where testable, one gap documented honestly)
+
+Voice call mode and camera capture already existed from earlier work
+(`src/App.tsx`, `src/lib/voiceInput.ts`, `src/lib/voiceOutput.ts`,
+`src/lib/gestureControl.ts`) — genuinely hands-free (auto-restarts
+listening after each reply, no re-clicking a mic button per turn), and
+already used `speechSynthesis` for genuinely local TTS. This phase fixed
+two real gaps and documented one real limitation rather than working
+around it:
+
+- **Language was hardcoded to Arabic** for both STT and TTS regardless of
+  what the user actually spoke. Fixed: call mode now starts from the
+  browser's own locale (`navigator.language`) and adapts per turn to
+  whatever `detectLanguage()` (already used for text chat) finds in the
+  user's transcript, via a new `speechLangTag()` mapping
+  (`src/lib/langDetect.ts`) from `detectLanguage`'s codes to real BCP-47
+  tags. Both the next recognition pass and the reply's TTS voice follow a
+  mid-call language switch. 7 new tests in `test/langDetect.test.ts`.
+- **No way to interrupt Yahalla while it was replying.** Added
+  tap-to-interrupt (click the call orb while speaking) as the real,
+  working form of barge-in. True voice-activated barge-in (interrupting
+  just by speaking, no tap) is **not implemented** — documented honestly
+  inline (`App.tsx`'s `interruptSpeaking()`) and in
+  `voiceInput.ts`: it needs real echo-cancellation audio-pipeline work
+  the plain Web Speech API cannot provide (a live recognizer would
+  otherwise pick up Yahalla's own voice from the speakers as if it were
+  the user talking).
+- **`voiceInput.ts`'s header comment was inaccurate**, describing Chrome's
+  Web Speech API as purely local. Corrected: in Chrome/Edge, STT audio is
+  actually sent to the browser vendor's own cloud recognition service —
+  not routed through any Yahalla/Strato server and no chat/agent
+  inference happens there, but it is not on-device recognition either,
+  unlike this app's TTS (`speechSynthesis`, genuinely local) or its
+  text-chat LLM tiers. A fully local STT path (e.g. a WASM-compiled
+  Whisper build, following the same self-hosted-asset pattern already
+  used for OCR/wllama/MediaPipe) is a real, scoped follow-up, **not
+  implemented in this pass** — flagged rather than glossed over.
+- Camera: capture-to-attach and blink-to-capture already worked and were
+  left as-is (already a real "foundation," per the audit that preceded
+  this phase — one-shot capture, not continuous monitoring; that's an
+  accurate description of what exists, not a gap introduced now).
+- Added a short "warm, human, light personality welcome" tone line to both
+  real system prompts (`local-runtime/src/agentLoop.ts`,
+  `src/lib/browserRuntime.ts`), explicit that personality never overrides
+  the evidence/verification hard rules already there.
+
+## Desktop packaging (Phase 7, done+tested where testable)
+
+The Electron shell (`desktop/src/main.cjs`, 121→163 lines) already
+auto-started local-runtime as a child process and bridged its auth token
+to the renderer via IPC (`desktop/src/preload.cjs`) — genuinely real, not
+a stub. This phase closed the three biggest real gaps found by an
+explicit audit before writing any code:
+
+- **No automatic model setup.** Hardware detection and a model
+  catalog/downloader already existed in local-runtime
+  (`hardware.ts`, `modelManager.ts`, exposed over HTTP by `server.ts`) but
+  were dead code from the desktop app's perspective — nothing ever called
+  them, so a fresh install had no model and no in-app way to get one.
+  Fixed: `desktop/src/runtimeSupervisor.cjs`'s `ensureModelReady()` runs
+  in the background after the window opens (never blocking it) and
+  orchestrates the existing, already-tested local-runtime REST endpoints:
+  check `/runtime/status` → if nothing's running, `/hardware` for a
+  recommendation → register/download/activate that model → `/runtime/start`.
+  Reports only coarse, non-technical phases (`checking`/`downloading`/
+  `starting_engine`/`ready`/`engine-missing`/`error`) over a new IPC
+  channel (`yahalla:model-status`, `preload.cjs`) — never raw byte
+  progress or log lines, matching the existing "hide numeric download
+  progress" design already used for the browser tier. `src/App.tsx`
+  renders these as a plain, friendly banner strip
+  (`.desktop-status-banner`) that never blocks chat — the user can keep
+  talking to Yahalla (browser tier) while this runs.
+- **No crash/restart handling.** local-runtime's `exit` handler used to
+  just log and stop. Fixed: `computeRestartDecision()` (pure function,
+  unit-tested) restarts with exponential backoff (1s → 2s → 4s → …),
+  resets its attempt count after a healthy run (≥60s uptime), and gives up
+  after 5 consecutive quick crashes, reporting `starting`/`restarting`/
+  `failed` over a second new IPC channel (`yahalla:runtime-status`).
+- **llama-server itself is still not bundled/auto-installed** — real
+  per-OS binary distribution (fetching and staging a matching
+  llama-server release binary for macOS/Windows/Linux) was judged out of
+  scope for this pass: it needs real network access and real execution
+  verification on all three OSes, neither of which this sandbox can
+  provide honestly. `ensureModelReady()` detects this case
+  (`llama_server_installed: false`) and reports `engine-missing` plainly
+  instead of hanging or pretending — the browser tier remains usable
+  meanwhile. Manual install (`brew install llama.cpp` etc., per
+  `desktop/README.md`) is still required today. This is the single
+  largest remaining gap toward "never touch a terminal."
+- 11 new tests in `desktop/test/runtimeSupervisor.test.cjs` (new
+  `desktop` test suite, `npm test` in `desktop/`): the restart-backoff
+  math, and `ensureModelReady()`'s full orchestration against a real fake
+  local-runtime-shaped HTTP server (already-reachable / engine-missing /
+  full first-run download flow / already-downloaded-model / a download
+  failure) — not mocked fetch, a real server receiving real requests in
+  the right order with the right bodies.
+
 ## Strato / external dependency facts (grep-verified, see prior full audit)
 
 - No hardcoded Strato hostname/IP/secret exists anywhere in source; no

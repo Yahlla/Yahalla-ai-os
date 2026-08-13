@@ -10,6 +10,7 @@ const { spawn } = require('node:child_process')
 const { existsSync, readFileSync } = require('node:fs')
 const { homedir } = require('node:os')
 const { join } = require('node:path')
+const { computeRestartDecision, ensureModelReady } = require('./runtimeSupervisor.cjs')
 
 // In the monorepo (dev), local-runtime and the frontend build live as
 // sibling directories. In a packaged app there is no monorepo -- everything
@@ -23,6 +24,9 @@ const RUNTIME_CONFIG_PATH = join(homedir(), '.yahalla', 'runtime', 'config.json'
 
 let runtimeProcess = null
 let mainWindow = null
+let isQuitting = false
+let restartAttempts = 0
+let lastStartedAt = 0
 
 function readRuntimeConfig() {
   if (!existsSync(RUNTIME_CONFIG_PATH)) return null
@@ -30,6 +34,15 @@ function readRuntimeConfig() {
     return JSON.parse(readFileSync(RUNTIME_CONFIG_PATH, 'utf8'))
   } catch {
     return null
+  }
+}
+
+// Best-effort notification to the renderer -- the window may not exist
+// yet (very first startup) or may have been closed; both are fine to
+// silently skip rather than throw.
+function notifyRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload)
   }
 }
 
@@ -53,9 +66,12 @@ function startRuntime() {
       `[desktop] local-runtime is not staged. In dev, run "node desktop/scripts/stage-resources.mjs" ` +
         `after building local-runtime/, packages/agent-tools/, and the frontend. Expected: ${RUNTIME_ENTRY}`,
     )
+    notifyRenderer('yahalla:runtime-status', { status: 'failed', reason: 'not_staged' })
     return
   }
   const projectRoot = process.env.YAHALLA_PROJECT_ROOT || process.cwd()
+  lastStartedAt = Date.now()
+  notifyRenderer('yahalla:runtime-status', { status: restartAttempts > 0 ? 'restarting' : 'starting' })
   runtimeProcess = spawn(process.execPath, [RUNTIME_ENTRY, `--project=${projectRoot}`], {
     stdio: 'inherit',
     env: process.env,
@@ -63,6 +79,19 @@ function startRuntime() {
   runtimeProcess.on('exit', (code) => {
     console.log(`[desktop] local-runtime exited with code ${code}`)
     runtimeProcess = null
+    if (isQuitting) return
+
+    const decision = computeRestartDecision(Date.now() - lastStartedAt, restartAttempts)
+    restartAttempts = decision.attempts
+
+    if (!decision.shouldRestart) {
+      console.error(`[desktop] local-runtime crashed ${decision.attempts - 1} times in a row -- giving up automatic restarts.`)
+      notifyRenderer('yahalla:runtime-status', { status: 'failed', reason: 'crash_loop' })
+      return
+    }
+
+    console.log(`[desktop] restarting local-runtime in ${decision.delayMs}ms (attempt ${decision.attempts})`)
+    setTimeout(startRuntime, decision.delayMs)
   })
 }
 
@@ -102,6 +131,15 @@ async function createWindow() {
   } else {
     await mainWindow.loadFile(FRONTEND_INDEX)
   }
+
+  // Never blocks the window from opening: the user can start using
+  // whatever's already available (browser tier, general chat) immediately
+  // while this runs in the background, exactly like the existing
+  // background browser-model warm-up already does for the web tier.
+  if (ready) {
+    const cfg = readRuntimeConfig()
+    if (cfg) void ensureModelReady(`http://127.0.0.1:${cfg.port}`, cfg.authToken, (payload) => notifyRenderer('yahalla:model-status', payload))
+  }
 }
 
 app.whenReady().then(() => {
@@ -118,4 +156,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', stopRuntime)
+app.on('before-quit', () => {
+  isQuitting = true
+  stopRuntime()
+})
