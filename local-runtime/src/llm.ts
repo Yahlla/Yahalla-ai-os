@@ -52,6 +52,102 @@ export async function chatCompletion(
   }
 }
 
+// Streaming counterpart of chatCompletion, for the same purely-local
+// llama-server endpoint with `stream: true` -- llama-server's OpenAI-
+// compatible endpoint emits a standard SSE `text/event-stream` body
+// (`data: {...}\n\n` per chunk, `data: [DONE]\n\n` at the end), so this
+// just accumulates the deltas the same shape a non-streaming response
+// would have (choices[0].message.{content,tool_calls}) while also handing
+// each content delta to onToken as it arrives -- callers that don't care
+// about live tokens keep using the plain chatCompletion above untouched.
+export async function chatCompletionStream(
+  baseUrl: string,
+  payload: Record<string, unknown>,
+  onToken: (delta: string) => void,
+  timeoutMs = 120_000,
+): Promise<LlmCallResult> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, stream: true }),
+      signal: controller.signal,
+    })
+    if (!response.ok || !response.body) {
+      const text = response.body ? await response.text() : ''
+      return { ok: false, errorMessage: `Local LLM returned HTTP ${response.status}: ${text.slice(0, 500)}` }
+    }
+
+    let content = ''
+    let toolCallsAccumulator: any[] | null = null
+    let buffer = ''
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      // SSE frames are separated by a blank line; a chunk of bytes from
+      // the network can contain zero, one, or several complete frames, so
+      // this has to loop over whatever full frames are currently in the
+      // buffer rather than assuming one read() == one frame.
+      let frameEnd: number
+      while ((frameEnd = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, frameEnd)
+        buffer = buffer.slice(frameEnd + 2)
+        const dataLine = frame.split('\n').find((line) => line.startsWith('data:'))
+        if (!dataLine) continue
+        const data = dataLine.slice('data:'.length).trim()
+        if (data === '[DONE]') continue
+
+        let chunk: any
+        try {
+          chunk = JSON.parse(data)
+        } catch {
+          continue
+        }
+        const delta = chunk?.choices?.[0]?.delta
+        if (typeof delta?.content === 'string' && delta.content) {
+          content += delta.content
+          onToken(delta.content)
+        }
+        if (Array.isArray(delta?.tool_calls)) {
+          toolCallsAccumulator ??= []
+          for (const tc of delta.tool_calls) {
+            const index = typeof tc.index === 'number' ? tc.index : 0
+            toolCallsAccumulator[index] ??= { id: tc.id, type: 'function', function: { name: '', arguments: '' } }
+            const entry = toolCallsAccumulator[index]
+            if (tc.id) entry.id = tc.id
+            if (tc.function?.name) entry.function.name += tc.function.name
+            if (tc.function?.arguments) entry.function.arguments += tc.function.arguments
+          }
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      data: { choices: [{ message: { role: 'assistant', content: toolCallsAccumulator ? null : content, tool_calls: toolCallsAccumulator ?? undefined } }] },
+    }
+  } catch (error) {
+    const isAbort = error instanceof DOMException && error.name === 'AbortError'
+    return {
+      ok: false,
+      errorMessage: isAbort
+        ? `Local LLM request timed out after ${timeoutMs}ms.`
+        : error instanceof Error
+          ? error.message
+          : 'Local LLM streaming request failed.',
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export async function isLlmReachable(baseUrl: string, timeoutMs = 3000): Promise<boolean> {
   try {
     const controller = new AbortController()

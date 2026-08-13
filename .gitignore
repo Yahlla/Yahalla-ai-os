@@ -3,6 +3,7 @@ dist/
 desktop/resources/
 desktop/dist-electron/
 public/mediapipe/
+public/wllama/
 .env
 .env.local
 .env.*.local

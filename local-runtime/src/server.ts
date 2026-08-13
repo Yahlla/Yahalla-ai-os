@@ -204,6 +204,31 @@ export function createHttpServer(deps: ServerDeps) {
         return send(res, 200, result)
       }
 
+      // Same as /chat, but emits each content token live over SSE as the
+      // model generates it (via agentLoop.ts's onToken, threaded down to
+      // llm.ts's chatCompletionStream) instead of waiting for the full
+      // answer -- the local-runtime tier's equivalent of the browser
+      // tier's already-streaming chat. A `token` frame per delta, then one
+      // final `done` frame carrying the exact same ChatResult shape
+      // /chat returns (so callers that only care about the final result
+      // and not live tokens can ignore the token frames entirely).
+      if (path === '/chat/stream' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const message = String(body.message ?? '')
+        if (!message.trim()) return send(res, 400, { success: false, error: 'message is required.' })
+
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
+        const result = await runChat(
+          ctxFrom(deps, embodiment, perception),
+          message,
+          typeof body.conversation_id === 'string' ? body.conversation_id : undefined,
+          (delta) => res.write(`data: ${JSON.stringify({ kind: 'token', delta })}\n\n`),
+        )
+        res.write(`data: ${JSON.stringify({ kind: 'done', ...result })}\n\n`)
+        res.end()
+        return
+      }
+
       const approvalMatch = path.match(/^\/approvals\/([^/]+)\/decide$/)
       if (approvalMatch && req.method === 'POST') {
         const body = await readJsonBody(req)

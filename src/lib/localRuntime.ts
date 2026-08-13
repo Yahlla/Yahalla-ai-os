@@ -108,6 +108,74 @@ export async function sendChatMessage(params: { message: string; conversation_id
   }
 }
 
+// Same normalization as sendChatMessage above, but against /chat/stream
+// (server.ts): forwards each live content token to onToken as it arrives
+// -- the local-runtime tier's equivalent of the browser tier's already-
+// streaming browserChatCompletion, so the composer shows live "typing"
+// for local-runtime the same way it already does for the browser tier
+// instead of a static wait until the whole answer is ready. Native
+// EventSource can't POST or send an Authorization header, so this reads
+// the SSE body manually, the same pattern subscribeLiveStatus already
+// uses above.
+export async function sendChatMessageStream(
+  params: { message: string; conversation_id?: string },
+  onToken: (delta: string) => void,
+): Promise<ChatResponse> {
+  const info = await getRuntimeInfo()
+  if (!info) throw new Error('Local Agent Runtime is not reachable from this window. Is Yahalla AI running?')
+
+  const response = await fetch(`${info.baseUrl}/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${info.authToken}` },
+    body: JSON.stringify({ message: params.message, conversation_id: params.conversation_id }),
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(`Local Agent Runtime returned HTTP ${response.status}`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: LocalChatResult | null = null
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const frames = buffer.split('\n\n')
+    buffer = frames.pop() ?? ''
+    for (const frame of frames) {
+      const dataLine = frame.split('\n').find((l) => l.startsWith('data: '))
+      if (!dataLine) continue
+      let parsed: { kind: 'token'; delta: string } | ({ kind: 'done' } & LocalChatResult)
+      try {
+        parsed = JSON.parse(dataLine.slice('data: '.length))
+      } catch {
+        continue
+      }
+      if (parsed.kind === 'token') onToken(parsed.delta)
+      else result = parsed
+    }
+  }
+
+  if (!result) throw new Error('Local Agent Runtime closed the stream without a result.')
+  if (!result.success && result.status === 'failed') throw new Error(result.error || 'Local Agent Runtime request failed.')
+
+  return {
+    success: result.success,
+    task_id: result.taskId,
+    conversation_id: result.conversationId,
+    status: result.status,
+    answer: result.answer,
+    error: result.error,
+    agent: { id: 'local', key: 'yahalla-core', name_ar: 'يحalla الأساسي', name_de: 'Yahalla Core', status: 'active' },
+    executed_tools: result.executedTools?.map((t, i) => ({ ...t, execution_id: `${result.taskId ?? 'local'}:${i}` })),
+    approval_required: result.status === 'waiting_approval',
+    tool_execution_id: result.approvalId,
+    approval_tool: result.approvalTool,
+  }
+}
+
 export type LiveUpdate =
   | { kind: 'embodiment'; state: string; summary: string | null; timestamp: string }
   | { kind: 'perception'; event: Record<string, unknown> }

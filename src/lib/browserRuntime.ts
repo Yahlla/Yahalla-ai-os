@@ -2,13 +2,27 @@ import type { BrowserChatMessage } from './browserLLM'
 import { browserChatCompletion, getLoadedModelId, isBrowserModelLoaded, isWebGPUSupported, loadBrowserModel, type BrowserLLMProgress } from './browserLLM'
 import { detectLanguage, languageInstructionLine } from './langDetect'
 import type { ChatResponse } from './types'
+import { getLoadedWasmModelKey, isWasmLLMSupported, isWasmModelLoaded, loadWasmModel, wasmChatCompletion } from './wasmLLM'
 
 // The browser-only inference path: no local-runtime process, no Electron,
-// no server -- the model runs on this device's own GPU via WebGPU, in this
-// tab. This is what makes "open the site on your phone" and "open the
-// site on your laptop" both work locally without either depending on the
-// other or on any third machine.
-//
+// no server -- the model runs entirely on this device, in this tab. Two
+// engines share this one entry point: WebGPU (browserLLM.ts, via
+// @mlc-ai/web-llm) when the browser supports it, and a WASM fallback
+// (wasmLLM.ts, via @wllama/wllama) when it doesn't -- this is what makes
+// "works on the weakest phone" actually true instead of silently meaning
+// "works on the weakest phone that also happens to support WebGPU," which
+// falls through to the cloud tier (or nothing, on a deployment with no
+// cloud tier configured) otherwise. Both engines are picked once per
+// browser (the support check is static for a given browser) and never
+// switch mid-session.
+type Engine = 'webgpu' | 'wasm'
+
+function selectedEngine(): Engine | null {
+  if (isWebGPUSupported()) return 'webgpu'
+  if (isWasmLLMSupported()) return 'wasm'
+  return null
+}
+
 // Honest limitation, stated to the model itself: a browser tab cannot read
 // or write files, run git, execute commands, or query Yahalla's own
 // database (tasks/projects/servers/devices/approvals) -- there is no code
@@ -28,9 +42,10 @@ import type { ChatResponse } from './types'
 // below) from a real per-message language detection instead of a single
 // static instruction that can't react to the user switching languages
 // mid-conversation.
-function buildSystemPrompt(detectedLanguageLine: string): string {
+function buildSystemPrompt(detectedLanguageLine: string, engine: Engine): string {
+  const engineDescription = engine === 'wasm' ? 'local, on-device inference (WebAssembly/CPU)' : 'local, on-device inference (WebGPU)'
   return `
-You are Yahalla AI, running entirely inside the user's own web browser via local, on-device inference (WebGPU) -- not a cloud service, not a chatbot with hidden server-side tools.
+You are Yahalla AI, running entirely inside the user's own web browser via ${engineDescription} -- not a cloud service, not a chatbot with hidden server-side tools.
 
 ${detectedLanguageLine}
 
@@ -50,15 +65,20 @@ Hard rules:
 }
 
 export async function checkBrowserRuntimeAvailable(): Promise<boolean> {
-  return isWebGPUSupported()
+  return selectedEngine() !== null
+}
+
+export function activeBrowserEngine(): Engine | null {
+  return selectedEngine()
 }
 
 export async function prepareBrowserModel(onProgress?: (p: BrowserLLMProgress) => void): Promise<string> {
+  if (selectedEngine() === 'wasm') return loadWasmModel(onProgress)
   return loadBrowserModel(onProgress)
 }
 
 export function browserModelReady(): boolean {
-  return isBrowserModelLoaded()
+  return selectedEngine() === 'wasm' ? isWasmModelLoaded() : isBrowserModelLoaded()
 }
 
 export async function sendChatMessage(
@@ -66,26 +86,28 @@ export async function sendChatMessage(
   message: string,
   onToken?: (delta: string) => void,
 ): Promise<ChatResponse & { updatedHistory: BrowserChatMessage[] }> {
+  const engine = selectedEngine() ?? 'webgpu'
   const detectedLanguage = detectLanguage(message)
   const messages: BrowserChatMessage[] = [
-    { role: 'system', content: buildSystemPrompt(languageInstructionLine(detectedLanguage)) },
+    { role: 'system', content: buildSystemPrompt(languageInstructionLine(detectedLanguage), engine) },
     ...history,
     { role: 'user', content: message },
   ]
 
-  const answer = await browserChatCompletion(messages, onToken)
+  const answer = engine === 'wasm' ? await wasmChatCompletion(messages, onToken) : await browserChatCompletion(messages, onToken)
   const updatedHistory: BrowserChatMessage[] = [
     ...history,
     { role: 'user', content: message },
     { role: 'assistant', content: answer },
   ]
 
+  const loadedModelId = engine === 'wasm' ? getLoadedWasmModelKey() : getLoadedModelId()
   return {
     success: true,
     status: 'completed',
     answer,
     agent: { id: 'browser', key: 'yahalla-core', name_ar: 'يحalla الأساسي', name_de: 'Yahalla Core', status: 'active' },
-    model: { id: 'browser', key: getLoadedModelId() ?? 'browser-model', name: getLoadedModelId() ?? 'Local browser model', type: 'general' },
+    model: { id: 'browser', key: loadedModelId ?? 'browser-model', name: loadedModelId ?? 'Local browser model', type: 'general' },
     updatedHistory,
   }
 }

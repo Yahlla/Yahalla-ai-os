@@ -7,7 +7,7 @@
     "node": "24.x"
   },
   "scripts": {
-    "postinstall": "node scripts/copy-mediapipe-assets.mjs",
+    "postinstall": "node scripts/copy-mediapipe-assets.mjs && node scripts/copy-wllama-assets.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
@@ -19,6 +19,7 @@
     "@mlc-ai/web-llm": "^0.2.84",
     "@supabase/supabase-js": "^2.112.2",
     "@tailwindcss/vite": "^4.3.3",
+    "@wllama/wllama": "^3.5.1",
     "lucide-react": "^1.30.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -31,6 +32,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
     "oxlint": "^1.75.0",
+    "playwright": "^1.62.1",
     "typescript": "~6.0.2",
     "vite": "^8.2.0"
   }

@@ -3046,7 +3046,20 @@ function ChatSection() {
         result = await callCloudBoost()
       } else if (runtimeHealth?.llm_reachable) {
         setRuntimeTier('local')
-        result = await localRuntime.sendChatMessage({ message, conversation_id: conversationId ?? undefined })
+        streamingMessageId = crypto.randomUUID()
+        const idForClosure = streamingMessageId
+        setMessages((prev) => [
+          ...prev,
+          { id: idForClosure, role: 'assistant', content: '', createdAt: new Date(), agent: 'yahalla-core' },
+        ])
+        setStreamingMessageId(idForClosure)
+        try {
+          result = await localRuntime.sendChatMessageStream({ message, conversation_id: conversationId ?? undefined }, (delta) => {
+            setMessages((prev) => prev.map((m) => (m.id === idForClosure ? { ...m, content: m.content + delta } : m)))
+          })
+        } finally {
+          setStreamingMessageId(null)
+        }
       } else if (await browserRuntime.checkBrowserRuntimeAvailable()) {
         setRuntimeTier('browser')
         // Usually already loaded or loading by now -- the background
@@ -3111,12 +3124,26 @@ function ChatSection() {
 
       if (streamingMessageId) {
         // Already streamed in incrementally -- just reconcile the final
-        // metadata (error flag, task id) onto the same message rather
-        // than appending a second one.
+        // metadata onto the same message rather than appending a second
+        // one. Includes tool/approval fields (not just error/task id)
+        // since local-runtime's streaming path (sendChatMessageStream)
+        // can end in 'waiting_approval' the same way its non-streaming
+        // path always could -- the browser tier, the only other caller of
+        // this branch until now, never had either.
         setMessages((prev) =>
           prev.map((m) =>
             m.id === streamingMessageId
-              ? { ...m, content: assistantContent, taskId: result.task_id, agent: result.agent?.key, error: !result.success }
+              ? {
+                  ...m,
+                  content: assistantContent,
+                  taskId: result.task_id,
+                  agent: result.agent?.key,
+                  error: !result.success,
+                  toolActivity: result.executed_tools as { tool: string; arguments?: Record<string, unknown>; result: Record<string, unknown> }[],
+                  approvalId: result.approval_required ? result.tool_execution_id : undefined,
+                  approvalTool: result.approval_required ? result.approval_tool : undefined,
+                  approvalDecision: result.approval_required ? 'pending' : undefined,
+                }
               : m,
           ),
         )
@@ -3274,7 +3301,8 @@ function ChatSection() {
             <div className="chat-agent-status">
               <span />
               {runtimeTier === 'local' && 'Local Runtime · Full speed on this device'}
-              {runtimeTier === 'browser' && 'Browser Mode (WebGPU) · one-time download'}
+              {runtimeTier === 'browser' &&
+                `Browser Mode (${browserRuntime.activeBrowserEngine() === 'wasm' ? 'WebAssembly' : 'WebGPU'}) · one-time download`}
               {runtimeTier === 'cloud' && 'Cloud fallback'}
               {runtimeTier === 'device' && 'Remote Device · real file/git/GitHub access'}
               {runtimeTier === null && 'AI Orchestrator · Online'}

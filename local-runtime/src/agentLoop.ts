@@ -5,7 +5,7 @@ import { newId } from './db.js'
 import type { EmbodimentStateMachine } from './embodiment/stateMachine.js'
 import { githubOpenPr, githubRead, githubWrite } from './github.js'
 import { detectLanguage, languageInstructionLine } from './langDetect.js'
-import { chatCompletion } from './llm.js'
+import { chatCompletion, chatCompletionStream } from './llm.js'
 import { addMemory, getPreference, recordTaskFeedback } from './memory.js'
 import { checkAccess } from './permissions.js'
 import type { WorldModel } from './perception/worldModel.js'
@@ -222,18 +222,32 @@ type LoopState = {
   executedTools: { tool: string; arguments: Record<string, unknown>; result: Record<string, unknown> }[]
 }
 
-async function runLoop(ctx: RuntimeContext, taskId: string, conversationId: string, state: LoopState): Promise<ChatResult> {
+async function runLoop(
+  ctx: RuntimeContext,
+  taskId: string,
+  conversationId: string,
+  state: LoopState,
+  onToken?: (delta: string) => void,
+): Promise<ChatResult> {
   const maxRounds = getPreference<number>(ctx.db, 'max_tool_rounds') ?? 15
   const llmTools = buildOpenAITools()
 
   for (let round = 0; round < maxRounds; round++) {
     ctx.embodiment.transition('THINKING', round === 0 ? 'Analyzing request' : 'Continuing analysis')
 
-    const result = await chatCompletion(ctx.llmBaseUrl, {
-      model: ctx.modelKey,
-      messages: state.messages,
-      tools: llmTools,
-    })
+    // onToken (only ever set by runChat, not generatePlan/resumeApproval)
+    // is threaded all the way down to a real streaming HTTP call
+    // (chatCompletionStream) so the caller sees live tokens the same way
+    // the browser tier already does -- every round still ends up with the
+    // exact same accumulated { message: { content, tool_calls } } shape
+    // either way, so tool-call detection and approval-gating below are
+    // byte-for-byte unaffected by which one ran. In practice a single
+    // round is either a plain-text answer or a tool call, never a mix, so
+    // forwarding content deltas live as they arrive never ends up
+    // "retracting" text the user already saw.
+    const result = onToken
+      ? await chatCompletionStream(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools }, onToken)
+      : await chatCompletion(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools })
 
     if (!result.ok) {
       ctx.embodiment.transition('ERROR', 'Local LLM request failed')
@@ -392,6 +406,7 @@ export async function runChat(
   ctx: RuntimeContext,
   message: string,
   conversationId?: string,
+  onToken?: (delta: string) => void,
 ): Promise<ChatResult> {
   // Checked before saveMessage inserts the current message, so it
   // reflects whether a conversation existed *before* this request --
@@ -429,7 +444,7 @@ export async function runChat(
   const systemPrompt = await buildSystemPrompt(ctx.projectRoot, ctx, message)
   const messages: ChatMessage[] = [{ role: 'system', content: systemPrompt + planContext }, ...history]
 
-  const chatResult = await runLoop(ctx, taskId, convId, { messages, executedTools: [] })
+  const chatResult = await runLoop(ctx, taskId, convId, { messages, executedTools: [] }, onToken)
 
   // Only worth remembering across conversations when real project work
   // happened (a tool actually ran) -- not every trivial Q&A, which would
