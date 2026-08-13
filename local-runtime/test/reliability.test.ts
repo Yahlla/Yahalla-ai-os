@@ -151,9 +151,9 @@ before(async () => {
   grantPermission(db, 'command_execution', '*', 'execute')
   grantPermission(db, 'network', '*', 'write')
 
-  fakeLlm = await startFakeLlm(18091)
+  fakeLlm = await startFakeLlm(18401)
 
-  const modelProcess = new LocalModelProcess(18091)
+  const modelProcess = new LocalModelProcess(18401)
   ;(modelProcess as any).child = { exitCode: null, killed: false }
 
   const config: RuntimeConfig = {
@@ -254,14 +254,14 @@ async function listenOn(server: import('node:http').Server, port: number): Promi
 }
 
 test('chatCompletionWithRetry retries a transient 503 and eventually succeeds', async () => {
-  const { server, getAttempts } = startFlakyServer(18092, (attempt) =>
+  const { server, getAttempts } = startFlakyServer(18402, (attempt) =>
     attempt < 3
       ? { status: 503, body: 'service unavailable' }
       : { status: 200, body: { choices: [{ message: { role: 'assistant', content: 'ok' } }] } },
   )
-  await listenOn(server, 18092)
+  await listenOn(server, 18402)
   try {
-    const result = await chatCompletionWithRetry('http://127.0.0.1:18092', { model: 'x', messages: [] }, { maxRetries: 3 })
+    const result = await chatCompletionWithRetry('http://127.0.0.1:18402', { model: 'x', messages: [] }, { maxRetries: 3 })
     assert.equal(result.ok, true)
     assert.equal(getAttempts(), 3)
   } finally {
@@ -270,10 +270,10 @@ test('chatCompletionWithRetry retries a transient 503 and eventually succeeds', 
 })
 
 test('chatCompletionWithRetry does not retry a permanent 400', async () => {
-  const { server, getAttempts } = startFlakyServer(18093, () => ({ status: 400, body: 'bad request' }))
-  await listenOn(server, 18093)
+  const { server, getAttempts } = startFlakyServer(18403, () => ({ status: 400, body: 'bad request' }))
+  await listenOn(server, 18403)
   try {
-    const result = await chatCompletionWithRetry('http://127.0.0.1:18093', { model: 'x', messages: [] }, { maxRetries: 3 })
+    const result = await chatCompletionWithRetry('http://127.0.0.1:18403', { model: 'x', messages: [] }, { maxRetries: 3 })
     assert.equal(result.ok, false)
     assert.equal(getAttempts(), 1)
   } finally {
@@ -282,10 +282,10 @@ test('chatCompletionWithRetry does not retry a permanent 400', async () => {
 })
 
 test('chatCompletionWithRetry gives up after maxRetries on a persistent transient failure', async () => {
-  const { server, getAttempts } = startFlakyServer(18094, () => ({ status: 500, body: 'nope' }))
-  await listenOn(server, 18094)
+  const { server, getAttempts } = startFlakyServer(18404, () => ({ status: 500, body: 'nope' }))
+  await listenOn(server, 18404)
   try {
-    const result = await chatCompletionWithRetry('http://127.0.0.1:18094', { model: 'x', messages: [] }, { maxRetries: 2 })
+    const result = await chatCompletionWithRetry('http://127.0.0.1:18404', { model: 'x', messages: [] }, { maxRetries: 2 })
     assert.equal(result.ok, false)
     assert.equal(getAttempts(), 3) // initial attempt + 2 retries
   } finally {
@@ -307,11 +307,11 @@ test('chatCompletionStreamWithRetry retries a transient failure before any token
     res.write('data: [DONE]\n\n')
     res.end()
   })
-  await listenOn(server, 18095)
+  await listenOn(server, 18405)
   try {
     const tokens: string[] = []
     const result = await chatCompletionStreamWithRetry(
-      'http://127.0.0.1:18095',
+      'http://127.0.0.1:18405',
       { model: 'x', messages: [] },
       (delta) => tokens.push(delta),
       { maxRetries: 2 },

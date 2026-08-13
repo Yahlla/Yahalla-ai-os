@@ -251,12 +251,60 @@ inert seed data feeding a cosmetic dropdown (`selectedAgent` in
 zero effect on local-runtime's actual behavior. There is no code anywhere
 that dispatches a sub-task to a differently-configured agent.
 
-## Browser tool — does not exist
+## Browser agent tool (Phase 4, done, tested)
 
-No browser-automation/navigation tool is registered in `tools.ts`. "Browser"
-today means only: the Control Center's own React UI runs in a browser, and
-the browser tiers (WebGPU/WASM) run a chat model in a tab. Neither is an
-agent tool that can navigate/inspect/click a web page.
+`local-runtime/src/browser.ts` (covered by `local-runtime/test/browser.test.ts`,
+12 tests against a real local HTTP fixture site and — where a real browser
+is present — a real headless Chromium) adds 5 new agent tools
+(`browser_open`, `browser_read`, `browser_click`, `browser_type`,
+`browser_close`) — real automation the agent can call as part of a
+multi-step task, not a browser page the user opens themselves:
+
+- Uses `playwright-core` (the driver library only, no bundled
+  browser-download step) pointed at a real Chrome/Chromium/Edge already on
+  the machine — auto-detected from common install paths per OS, or a
+  pre-provisioned `PLAYWRIGHT_BROWSERS_PATH` install, or an explicit
+  `YAHALLA_CHROMIUM_PATH` override. Nothing is downloaded at runtime;
+  `findChromiumExecutable()` returns `null` (an honest "not available on
+  this machine" error surfaced to the model) rather than guessing or
+  faking a result when no browser is found.
+- One persistent headless session (browser + page) reused across
+  `browser_open`/`read`/`click`/`type` calls within a task, so a multi-step
+  flow (open → click a result → read it → fill a form → submit) is a
+  sequence of tool calls against the same live page, not a fresh
+  disconnected browser each time. Auto-closed after 10 minutes idle;
+  `browser_close` releases it explicitly when a task is done.
+- Sandboxed: only `http://`/`https://` URLs may be opened (`file://`,
+  `javascript:`, `data:`, and anything else is refused before a browser
+  session is even created); a new `browser` permission scope gates the
+  whole capability (`scope: 'browser', access: 'execute'`) — nothing
+  granted by default, same standing-permission model as every other tool
+  category.
+- `browser_read` returns the page title + visible text (truncated at
+  15,000 chars) with no selector, or the text of every element matching a
+  given CSS selector — this is how "extract specific info" works (e.g.
+  `selector: "table td"`), on top of the same read used for general page
+  understanding.
+- Action timeouts are deliberately short (8s for click/type, so a wrong
+  selector fails back to the model quickly instead of stalling a whole
+  task) versus navigation (20s, real page loads can be slower).
+- Running the local-runtime test suite in this dev/CI sandbox specifically
+  (not a general requirement) needs `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`
+  set for `browser.test.ts`'s live-Chromium tests to run instead of
+  cleanly skipping; a real desktop install finds a real installed
+  Chrome/Chromium/Edge on its own via `findChromiumExecutable()`.
+- Also caught and fixed while adding this phase's tests: several existing
+  local-runtime test files independently picked overlapping hardcoded
+  localhost ports (`deviceDispatch.test.ts`'s internal 18091–18100 range
+  collided with the new Phase 1–4 test files, and separately with
+  `chatStream.test.ts`'s 18100) — invisible most of the time because
+  `node --test` runs test files concurrently and lucky scheduling usually
+  kept them from overlapping, but a real, reproducible source of flaky
+  `EADDRINUSE` failures once enough test files ran side by side. Given
+  each new test file's own fixed port block (18401–18408) and moved the
+  one genuine pre-existing collision (`deviceDispatch.test.ts`'s fake
+  GitHub server at 18100) to a free port -- confirmed stable across
+  repeated full-suite runs.
 
 ## Strato / external dependency facts (grep-verified, see prior full audit)
 
@@ -288,13 +336,18 @@ root:               tsc -b clean; vite build succeeds (6 chunks, lib chunk
                      23/23 pass
 packages/agent-tools: typecheck clean; build clean (no test script)
 device-agent:        typecheck clean; build clean (no test script)
-local-runtime:       typecheck clean; build clean; npm test: 96/96 pass
-                     (76 baseline + 7 from Phase 1 reliability.test.ts + 6
-                     from Phase 2 selfDev.test.ts + 7 from Phase 3
-                     projectIndex.test.ts; needs a reachable Postgres for
-                     databaseIntegration.test.ts's arbitrary-db-connector
-                     tests — fails cleanly and only that suite if Postgres
-                     is absent, everything else passes regardless)
+local-runtime:       typecheck clean; build clean; npm test: 108/108 pass,
+                     confirmed stable across repeated runs (76 baseline +
+                     7 from Phase 1 reliability.test.ts + 6 from Phase 2
+                     selfDev.test.ts + 7 from Phase 3 projectIndex.test.ts
+                     + 12 from Phase 4 browser.test.ts; needs a reachable
+                     Postgres for databaseIntegration.test.ts's arbitrary-
+                     db-connector tests — fails cleanly and only that
+                     suite if Postgres is absent, everything else passes
+                     regardless; browser.test.ts's live-browser tests need
+                     a real Chrome/Chromium/Edge findable on the machine —
+                     see the browser-tool section below — or they skip
+                     cleanly rather than failing)
 platform/api:        typecheck clean; build clean; npm test: 101/101 pass
                      (needs TEST_DATABASE_URL + schema applied via
                      platform/db/apply.sh)

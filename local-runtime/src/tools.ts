@@ -2,7 +2,7 @@ import type { AccessLevel, PermissionScope } from './permissions.js'
 
 export type ToolDef = {
   key: string
-  category: 'files' | 'system' | 'github' | 'database'
+  category: 'files' | 'system' | 'github' | 'database' | 'browser'
   requiresApproval: boolean
   description: string
   parameters: Record<string, unknown>
@@ -250,6 +250,69 @@ export const TOOLS: ToolDef[] = [
       additionalProperties: false,
     },
     permission: { scope: 'network', access: 'write' },
+  },
+  {
+    key: 'browser_open',
+    category: 'browser',
+    requiresApproval: false,
+    description: 'Open a real, sandboxed local browser and navigate it to a URL. Starts a persistent browser session that browser_read/browser_click/browser_type reuse for multi-step tasks (e.g. search, then click a result, then read it). Only http:// and https:// URLs are allowed.',
+    parameters: {
+      type: 'object',
+      properties: { url: { type: 'string', description: 'The http:// or https:// URL to open.' } },
+      required: ['url'],
+      additionalProperties: false,
+    },
+    permission: { scope: 'browser', access: 'execute' },
+  },
+  {
+    key: 'browser_read',
+    category: 'browser',
+    requiresApproval: false,
+    description: 'Read the current browser page. With no selector, returns the page title and its visible text content (truncated if very long). With a CSS selector, returns the text content of every matching element instead -- use this to extract specific info (e.g. "a.title", "table td").',
+    parameters: {
+      type: 'object',
+      properties: { selector: { type: 'string', description: 'Optional CSS selector to extract text from specific elements instead of the whole page.' } },
+      additionalProperties: false,
+    },
+    permission: { scope: 'browser', access: 'execute' },
+  },
+  {
+    key: 'browser_click',
+    category: 'browser',
+    requiresApproval: false,
+    description: 'Click the first element on the current browser page matching a CSS selector (e.g. a link, a button). May trigger navigation, in which case the returned url/title reflect the page after it settled.',
+    parameters: {
+      type: 'object',
+      properties: { selector: { type: 'string', description: 'CSS selector of the element to click.' } },
+      required: ['selector'],
+      additionalProperties: false,
+    },
+    permission: { scope: 'browser', access: 'execute' },
+  },
+  {
+    key: 'browser_type',
+    category: 'browser',
+    requiresApproval: false,
+    description: 'Type text into the first element on the current browser page matching a CSS selector (e.g. an input or textarea) -- replaces any existing value. Set submit=true to also press Enter and submit a form.',
+    parameters: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string', description: 'CSS selector of the input/textarea to type into.' },
+        text: { type: 'string', description: 'Text to type.' },
+        submit: { type: 'boolean', description: 'Press Enter after typing (e.g. to submit a search form).' },
+      },
+      required: ['selector', 'text'],
+      additionalProperties: false,
+    },
+    permission: { scope: 'browser', access: 'execute' },
+  },
+  {
+    key: 'browser_close',
+    category: 'browser',
+    requiresApproval: false,
+    description: 'Close the current browser session and free its resources. Call this once a web task is finished -- a new browser_open will start a fresh session if needed again later.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    permission: { scope: 'browser', access: 'execute' },
   },
 ]
 

@@ -10,6 +10,7 @@ export type PermissionScope =
   | 'application_launching'
   | 'camera'
   | 'microphone'
+  | 'browser'
 
 export type AccessLevel = 'none' | 'read' | 'write' | 'execute'
 

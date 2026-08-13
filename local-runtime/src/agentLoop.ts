@@ -7,6 +7,7 @@ import { githubOpenPr, githubRead, githubWrite } from './github.js'
 import { diagnoseCommandFailure, signatureForToolFailure, sortKeys } from './diagnostics.js'
 import { detectLanguage, languageInstructionLine } from './langDetect.js'
 import { chatCompletion, chatCompletionStreamWithRetry, chatCompletionWithRetry } from './llm.js'
+import { browserClick, browserClose, browserOpen, browserRead, browserType } from './browser.js'
 import { addKnowledge, addMemory, getPreference, recordTaskFeedback } from './memory.js'
 import { checkAccess } from './permissions.js'
 import type { WorldModel } from './perception/worldModel.js'
@@ -167,6 +168,16 @@ function summarizeToolCall(tool: ToolDef, args: Record<string, unknown>): string
       return 'Querying the database'
     case 'db_execute':
       return 'Modifying the database'
+    case 'browser_open':
+      return `Opening ${args.url ?? 'a web page'}`
+    case 'browser_read':
+      return 'Reading the web page'
+    case 'browser_click':
+      return `Clicking "${args.selector ?? ''}"`
+    case 'browser_type':
+      return 'Typing into the web page'
+    case 'browser_close':
+      return 'Closing the browser'
     default:
       return `Using ${tool.key}`
   }
@@ -240,6 +251,14 @@ async function executeToolNow(
 
   if (tool.key === 'get_project_overview') {
     return { success: true, overview: getProjectIndex(ctx.projectRoot, { forceRefresh: args.refresh === true }) }
+  }
+
+  if (tool.category === 'browser') {
+    if (tool.key === 'browser_open') return browserOpen(args)
+    if (tool.key === 'browser_read') return browserRead(args)
+    if (tool.key === 'browser_click') return browserClick(args)
+    if (tool.key === 'browser_type') return browserType(args)
+    return browserClose()
   }
 
   if (tool.category === 'github') {

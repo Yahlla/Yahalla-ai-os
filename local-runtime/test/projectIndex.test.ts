@@ -189,8 +189,8 @@ before(async () => {
   db = openDb(':memory:')
   grantPermission(db, 'project', fixtureDir, 'write')
 
-  fakeLlm = await startFakeLlm(18097)
-  const modelProcess = new LocalModelProcess(18097)
+  fakeLlm = await startFakeLlm(18407)
+  const modelProcess = new LocalModelProcess(18407)
   ;(modelProcess as any).child = { exitCode: null, killed: false }
 
   const config: RuntimeConfig = { port: 0, authToken, projectRoot: fixtureDir, allowedOrigins: ['http://localhost:5173'] }

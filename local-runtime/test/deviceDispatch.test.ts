@@ -236,8 +236,8 @@ test('a task that hits an approval gate is only reported once the device owner d
   setPreference(dbInstance, 'github_token', 'fake-token')
 
   fakeLlm = await startFakeLlm(18097)
-  const fakeGithub = await startFakeGithub(18100)
-  process.env.GITHUB_API_BASE_URL = 'http://127.0.0.1:18100'
+  const fakeGithub = await startFakeGithub(18103)
+  process.env.GITHUB_API_BASE_URL = 'http://127.0.0.1:18103'
   const platformApi = await startFakePlatformApi(18098, { expectedCode: 'CODE3', deviceToken: 'device-token-3' })
   try {
     const ctx = buildCtx(dbInstance, 18097)
