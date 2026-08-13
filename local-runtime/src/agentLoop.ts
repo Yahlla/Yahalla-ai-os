@@ -47,6 +47,16 @@ export type RuntimeContext = {
 // prompt -- these are the behavioral rules that matter, independent of
 // where the agent loop actually executes.
 async function buildSystemPrompt(projectRoot: string, ctx: RuntimeContext, currentMessage: string): Promise<string> {
+  // Real, near-instant step (the detector itself runs in <5ms, see
+  // langDetect.ts) surfaced through the same embodiment.transition() +
+  // /live/stream SSE mechanism the "Analyzing request"/"Continuing
+  // analysis" steps right after this already use -- the frontend's
+  // Live Thinking Card (App.tsx's thinkingSteps) picks this up with no
+  // changes needed on that side, since it already renders any transition
+  // this loop emits.
+  ctx.embodiment.transition('THINKING', 'Detecting language')
+  const detectedLanguage = detectLanguage(currentMessage)
+
   const perceptionContext = buildPerceptionContext(ctx)
   const memoryContext = await buildMemoryContext(ctx, currentMessage)
   return `
@@ -65,7 +75,7 @@ Git and GitHub: git_status/git_diff/git_create_branch/git_commit/git_push/github
 
 Databases: call db_list_connections first if you don't already know a connection's id. db_query is read-only (enforced by the database itself, not just convention) and safe to use freely for inspecting data/schema, debugging, and diagnostics. db_execute runs writes/DDL and requires the user's approval -- call it directly, never ask the user to run SQL themselves, and never fabricate query results or row counts.
 ${perceptionContext ? `\n${perceptionContext}\n` : ''}${memoryContext ? `\n${memoryContext}\n` : ''}
-Be concise and useful. ${languageInstructionLine(detectLanguage(currentMessage))}
+Be concise and useful. ${languageInstructionLine(detectedLanguage)}
 `.trim()
 }
 
