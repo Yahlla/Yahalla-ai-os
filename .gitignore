@@ -4,6 +4,7 @@ desktop/resources/
 desktop/dist-electron/
 public/mediapipe/
 public/wllama/
+public/tesseract/
 .env
 .env.local
 .env.*.local

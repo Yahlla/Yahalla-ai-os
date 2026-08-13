@@ -10,6 +10,7 @@ import * as browserRuntime from './lib/browserRuntime'
 import * as platformApi from './lib/platformApi'
 import { requestMediaPermission } from './lib/capabilities'
 import { detectLanguage, languageInstructionLine } from './lib/langDetect'
+import { recognizeText } from './lib/ocr'
 import { createVoiceRecognizer, isSpeechRecognitionSupported, type VoiceRecognizer } from './lib/voiceInput'
 import * as voiceOutput from './lib/voiceOutput'
 import { createBlinkDetector, isGestureControlSupported, type BlinkDetector } from './lib/gestureControl'
@@ -2877,21 +2878,37 @@ function ChatSection() {
     const fileContext = attachedFiles
       .map((f) => `\n\n--- attached file: ${f.name} ---\n\`\`\`\n${f.content}\n\`\`\``)
       .join('')
-    // No vision-capable model is connected in any tier yet -- saying so
-    // explicitly in the prompt itself keeps the model from guessing at or
-    // hallucinating a description of a photo it structurally cannot see,
-    // the same honesty rule as browserRuntime's system prompt.
-    const imageContext = pendingImage
-      ? '\n\n[User attached a photo. No vision-capable model is connected in this build -- you cannot see or describe its contents. Say so plainly if asked about it.]'
-      : ''
-    const message = (typed || `(${attachedFiles.length + (pendingImage ? 1 : 0)} attachment(s), no message)`) + fileContext + imageContext
     const attachmentsForDisplay = attachedFiles.map((f) => ({ name: f.name, size: f.size }))
+    const capturedImage = pendingImage
 
     if (!voiceText) setInput('')
     setAttachedFiles([])
     setAttachmentError('')
     setPendingImage(null)
     setError('')
+    setSending(true)
+    setThinkingSteps([])
+
+    // Real local OCR (Tesseract.js, src/lib/ocr.ts) on any attached/
+    // captured image -- entirely on-device, the image and its extracted
+    // text never leave this browser tab. Still an honest boundary: this
+    // is text extraction, not a vision-description model, so a photo
+    // with no legible text still gets a plain "no text found" note
+    // rather than the model guessing at what the image shows.
+    let imageContext = ''
+    if (capturedImage) {
+      setThinkingSteps((prev) => [...prev, { state: 'THINKING', summary: 'Reading document…', ts: Date.now() }].slice(-8))
+      try {
+        const ocrResult = await recognizeText(capturedImage, typed)
+        imageContext = ocrResult.text
+          ? `\n\n[Text extracted locally (OCR) from the attached photo:]\n${ocrResult.text}`
+          : '\n\n[User attached a photo. Local OCR found no legible text in it -- this build has no vision-description model, so only text extraction is possible, not a description of the image.]'
+      } catch {
+        imageContext = '\n\n[User attached a photo. Local OCR failed to process it -- this build has no vision-description model, so only text extraction is possible, not a description of the image.]'
+      }
+    }
+
+    const message = (typed || `(${attachedFiles.length + (capturedImage ? 1 : 0)} attachment(s), no message)`) + fileContext + imageContext
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -2899,12 +2916,10 @@ function ChatSection() {
       content: message,
       createdAt: new Date(),
       attachments: attachmentsForDisplay.length > 0 ? attachmentsForDisplay : undefined,
-      imageDataUrl: pendingImage ?? undefined,
+      imageDataUrl: capturedImage ?? undefined,
     }
 
     setMessages((prev) => [...prev, userMessage])
-    setSending(true)
-    setThinkingSteps([])
 
     try {
       // Three-tier local-first fallback, in order of preference:
@@ -3579,7 +3594,7 @@ function ChatSection() {
               {pendingImage && (
                 <span className="attachment-chip image-chip">
                   <img src={pendingImage} alt="Captured" />
-                  Photo attached (no vision model connected)
+                  Photo attached -- text will be read locally (OCR)
                   <button type="button" onClick={() => setPendingImage(null)} title="Remove">
                     <X size={11} />
                   </button>
