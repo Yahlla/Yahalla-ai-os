@@ -148,6 +148,70 @@ export async function chatCompletionStream(
   }
 }
 
+// HTTP 5xx/429 and network-level failures (timeouts, connection resets --
+// anything without a parsed status code) are worth a bounded retry: the
+// local model process can be mid-restart, briefly overloaded, or the OS
+// just hiccuped. A parsed 4xx (bad request, model not found, etc.) means
+// the request itself is wrong and retrying it would just fail the same
+// way again, so those are never retried.
+function isTransientLlmError(errorMessage: string): boolean {
+  const httpMatch = errorMessage.match(/HTTP (\d\d\d)/)
+  if (httpMatch) {
+    const status = Number(httpMatch[1])
+    return status >= 500 || status === 429
+  }
+  return true
+}
+
+// Bounded exponential-backoff retry around chatCompletion, for the "the
+// local LLM process hiccuped" case that previously failed the whole task
+// on the first bad response. Never retries a permanent (4xx) failure.
+export async function chatCompletionWithRetry(
+  baseUrl: string,
+  payload: Record<string, unknown>,
+  opts: { timeoutMs?: number; maxRetries?: number } = {},
+): Promise<LlmCallResult> {
+  const maxRetries = opts.maxRetries ?? 2
+  let lastResult: LlmCallResult = { ok: false, errorMessage: 'Local LLM request failed.' }
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    lastResult = await chatCompletion(baseUrl, payload, opts.timeoutMs)
+    if (lastResult.ok) return lastResult
+    if (!isTransientLlmError(lastResult.errorMessage) || attempt === maxRetries) return lastResult
+    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt))
+  }
+  return lastResult
+}
+
+// Streaming counterpart. A retry is only safe before any token has been
+// forwarded to the caller's onToken -- once the user has seen live output,
+// retrying would duplicate or contradict what they already saw, so a
+// failure past that point is returned as-is instead of retried.
+export async function chatCompletionStreamWithRetry(
+  baseUrl: string,
+  payload: Record<string, unknown>,
+  onToken: (delta: string) => void,
+  opts: { timeoutMs?: number; maxRetries?: number } = {},
+): Promise<LlmCallResult> {
+  const maxRetries = opts.maxRetries ?? 2
+  let lastResult: LlmCallResult = { ok: false, errorMessage: 'Local LLM streaming request failed.' }
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    let forwardedAny = false
+    lastResult = await chatCompletionStream(
+      baseUrl,
+      payload,
+      (delta) => {
+        forwardedAny = true
+        onToken(delta)
+      },
+      opts.timeoutMs,
+    )
+    if (lastResult.ok) return lastResult
+    if (forwardedAny || !isTransientLlmError(lastResult.errorMessage) || attempt === maxRetries) return lastResult
+    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt))
+  }
+  return lastResult
+}
+
 export async function isLlmReachable(baseUrl: string, timeoutMs = 3000): Promise<boolean> {
   try {
     const controller = new AbortController()

@@ -4,8 +4,9 @@ import type { Db } from './db.js'
 import { newId } from './db.js'
 import type { EmbodimentStateMachine } from './embodiment/stateMachine.js'
 import { githubOpenPr, githubRead, githubWrite } from './github.js'
+import { diagnoseCommandFailure, signatureForToolFailure, sortKeys } from './diagnostics.js'
 import { detectLanguage, languageInstructionLine } from './langDetect.js'
-import { chatCompletion, chatCompletionStream } from './llm.js'
+import { chatCompletion, chatCompletionStreamWithRetry, chatCompletionWithRetry } from './llm.js'
 import { addMemory, getPreference, recordTaskFeedback } from './memory.js'
 import { checkAccess } from './permissions.js'
 import type { WorldModel } from './perception/worldModel.js'
@@ -166,6 +167,38 @@ function summarizeToolResult(tool: ToolDef, result: Record<string, unknown>): st
   return `${summarizeToolCall(tool, {})} -- done`
 }
 
+// Cross-round repeated-failure detection: a failed result gets a stable
+// signature (structured, via diagnostics.ts's diagnoseCommandFailure for
+// run_project_command since it has stdout/stderr to fingerprint; generic
+// for every other tool). If this exact {tool, arguments, error} has
+// already failed before in this task, the model is told explicitly instead
+// of being left to silently repeat the same failing strategy until
+// max_tool_rounds runs out. A successful result is left untouched.
+function annotateRepeatedFailure(
+  state: LoopState,
+  tool: ToolDef,
+  args: Record<string, unknown>,
+  result: Record<string, unknown>,
+): Record<string, unknown> {
+  if (result.success !== false) return result
+
+  const signature =
+    tool.key === 'run_project_command'
+      ? diagnoseCommandFailure(String(args.command ?? ''), result as { exit_code?: number | null; stdout?: string; stderr?: string })
+          .failureSignature
+      : signatureForToolFailure(tool.key, args, result.error ?? result)
+
+  state.failureSignatures ??= {}
+  const priorCount = state.failureSignatures[signature] ?? 0
+  state.failureSignatures[signature] = priorCount + 1
+
+  if (priorCount === 0) return result
+  return {
+    ...result,
+    repeated_failure_warning: `This exact call has already failed the same way ${priorCount} time(s) before in this task. Repeating it unchanged will not help -- try a different approach, inspect more context first, or explain to the user why it cannot proceed.`,
+  }
+}
+
 function toolPermissionTarget(tool: ToolDef, projectRoot: string): string {
   return tool.permission.scope === 'project' ? projectRoot : '*'
 }
@@ -230,6 +263,12 @@ function saveMessage(db: Db, conversationId: string, role: string, content: stri
 type LoopState = {
   messages: ChatMessage[]
   executedTools: { tool: string; arguments: Record<string, unknown>; result: Record<string, unknown> }[]
+  // Signature -> occurrence count, for cross-round repeated-failure
+  // detection (see diagnostics.ts). Plain Record, not a Map: this whole
+  // object round-trips through JSON.stringify/JSON.parse when a task pauses
+  // for approval (see resumeApproval below), and a Map does not survive
+  // that round-trip.
+  failureSignatures?: Record<string, number>
 }
 
 async function runLoop(
@@ -256,8 +295,8 @@ async function runLoop(
     // forwarding content deltas live as they arrive never ends up
     // "retracting" text the user already saw.
     const result = onToken
-      ? await chatCompletionStream(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools }, onToken)
-      : await chatCompletion(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools })
+      ? await chatCompletionStreamWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools }, onToken)
+      : await chatCompletionWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools })
 
     if (!result.ok) {
       ctx.embodiment.transition('ERROR', 'Local LLM request failed')
@@ -303,14 +342,24 @@ async function runLoop(
 
     state.messages.push({ role: 'assistant', content: message.content ?? null, tool_calls: toolCalls })
 
+    // Same-round dedup: a model that emits the exact same {tool, arguments}
+    // call twice in one response (models do this, especially smaller ones)
+    // should get the same result echoed back for the repeat, not run the
+    // side effect twice. Only scoped to this one round -- calling the same
+    // tool with the same arguments again in a *later* round is legitimate
+    // (e.g. re-running a test command after a fix) and is handled by
+    // repeated-failure detection below, not blocked here.
+    const seenThisRound = new Map<string, Record<string, unknown>>()
+
     for (const call of toolCalls) {
       const toolName = call.function?.name
       const tool = getTool(toolName)
       let args: Record<string, unknown> = {}
+      let argsParseFailed = false
       try {
         args = typeof call.function?.arguments === 'string' ? JSON.parse(call.function.arguments) : (call.function?.arguments ?? {})
       } catch {
-        args = {}
+        argsParseFailed = true
       }
 
       if (!tool) {
@@ -319,6 +368,31 @@ async function runLoop(
           tool_call_id: call.id,
           name: toolName,
           content: JSON.stringify({ success: false, error: `Tool "${toolName}" is not available.` }),
+        })
+        continue
+      }
+
+      if (argsParseFailed) {
+        state.messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: tool.key,
+          content: JSON.stringify({
+            success: false,
+            error: `Arguments for "${tool.key}" were not valid JSON: ${String(call.function?.arguments).slice(0, 300)}. Re-call the tool with valid JSON arguments.`,
+          }),
+        })
+        continue
+      }
+
+      const dedupKey = `${tool.key}::${JSON.stringify(sortKeys(args))}`
+      const cached = seenThisRound.get(dedupKey)
+      if (cached) {
+        state.messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: tool.key,
+          content: JSON.stringify({ ...cached, note: 'Duplicate call in the same round -- reusing the prior result instead of re-executing.' }),
         })
         continue
       }
@@ -344,7 +418,10 @@ async function runLoop(
       const toolResult = await executeToolNow(ctx, tool, args)
       ctx.embodiment.transition('ACTING', summarizeToolResult(tool, toolResult))
       state.executedTools.push({ tool: tool.key, arguments: args, result: toolResult })
-      state.messages.push({ role: 'tool', tool_call_id: call.id, name: tool.key, content: JSON.stringify(toolResult) })
+      seenThisRound.set(dedupKey, toolResult)
+
+      const reportedResult = annotateRepeatedFailure(state, tool, args, toolResult)
+      state.messages.push({ role: 'tool', tool_call_id: call.id, name: tool.key, content: JSON.stringify(reportedResult) })
     }
   }
 
@@ -515,11 +592,13 @@ export async function resumeApproval(
   ctx.db.prepare('UPDATE approvals SET result = ? WHERE id = ?').run(JSON.stringify(toolResult), approvalId)
 
   context.executedTools.push({ tool: tool.key, arguments: args, result: toolResult })
+  const reportedResult =
+    decision === 'approve' ? annotateRepeatedFailure(context, tool, args, toolResult) : toolResult
   context.messages.push({
     role: 'tool',
     tool_call_id: context.pendingToolCallId,
     name: tool.key,
-    content: JSON.stringify(toolResult),
+    content: JSON.stringify(reportedResult),
   })
 
   ctx.db.prepare("UPDATE tasks SET status='running' WHERE id=?").run(approval.task_id)
@@ -527,5 +606,6 @@ export async function resumeApproval(
   return runLoop(ctx, approval.task_id, context.conversationId, {
     messages: context.messages,
     executedTools: context.executedTools,
+    failureSignatures: context.failureSignatures ?? {},
   })
 }

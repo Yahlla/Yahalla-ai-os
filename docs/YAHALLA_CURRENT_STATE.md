@@ -104,19 +104,44 @@ never contains.
   and exposed via `POST /chat/stream`, proven end-to-end (a tool call
   executes correctly mid-stream while content still streams for the final
   answer).
-- **Known gaps, confirmed by reading the code, not assumed** (these are
-  exactly what Phase 1 of this build-out targets):
-  - No tool-call deduplication — an LLM emitting the same
-    `{tool, arguments}` twice in one round runs it twice.
-  - No LLM-call retry — a failed `chatCompletion`/`chatCompletionStream`
-    call ends the task as `failed` immediately, no backoff/retry.
-  - Malformed tool-call JSON arguments are silently swallowed to `{}`
-    (`runLoop`'s `try { JSON.parse(...) } catch { args = {} }`) — the
-    model is never told its own arguments failed to parse.
-  - No repeated-failure detection — a model repeating the same failing
-    strategy just burns through `max_tool_rounds` with no earlier signal.
-  - No structured diagnosis — "diagnosis" today is whatever the model
-    infers from raw `stdout`/`stderr` text with zero assistance.
+- **Phase 1 reliability work (done, tested)** — `local-runtime/src/agentLoop.ts`
+  and `local-runtime/src/llm.ts`, covered by `local-runtime/test/reliability.test.ts`
+  (7 new tests, all against real HTTP servers, no stubs):
+  - **Same-round tool-call dedup**: an LLM emitting the identical
+    `{tool, arguments}` call twice in one response's `tool_calls` batch now
+    executes it once; the duplicate is served the cached result instead of
+    re-running the side effect. Scoped to one round only — the same call in
+    a *later* round (e.g. re-running a test after a fix) still runs for real.
+  - **LLM-call retry** (`llm.ts`'s `chatCompletionWithRetry` /
+    `chatCompletionStreamWithRetry`): a transient failure (HTTP 5xx/429, or
+    any network-level error without a parsed status) is retried up to 2
+    times with exponential backoff (500ms, 1000ms); a permanent failure
+    (parsed HTTP 4xx) is never retried. The streaming variant only retries
+    while zero tokens have been forwarded to the caller — once the user has
+    seen live output, a failure is returned as-is rather than risking
+    duplicate/contradictory partial output.
+  - **Malformed tool-call arguments are surfaced, not swallowed**: invalid
+    JSON in a `tool_calls[].function.arguments` string now produces an
+    explicit `role: 'tool'` error message telling the model its own
+    arguments didn't parse, instead of silently proceeding with `{}`.
+  - **Cross-round repeated-failure detection**
+    (`local-runtime/src/diagnostics.ts`'s `diagnoseCommandFailure` /
+    `signatureForToolFailure`): every failed tool result is fingerprinted
+    (structured command/exit-code/first-output-line for
+    `run_project_command`, generic `{tool, args, error}` hash for every
+    other tool). A second occurrence of the exact same failure within one
+    task gets a `repeated_failure_warning` field injected into the tool
+    result telling the model repeating it again will not help. Counts are
+    carried through an approval pause/resume via `LoopState.failureSignatures`
+    (a plain `Record<string, number>`, not a `Map`, since the loop state
+    round-trips through `JSON.stringify`/`JSON.parse` in the `approvals.context`
+    column and a `Map` does not survive that).
+  - **Structured command diagnosis** (`diagnostics.ts`'s
+    `diagnoseCommandFailure`): classifies a failed `run_project_command`
+    result into an `errorType` (`test_failure` / `build_failure` /
+    `syntax_error` / `type_error` / `module_not_found` / `permission_denied`
+    / `timeout` / `unknown`) and extracts a likely `file`/`line` from the
+    output, without replacing the raw `stdout`/`stderr` the model already saw.
 
 ## Self-repair (existing, single-cycle)
 
@@ -175,11 +200,12 @@ root:               tsc -b clean; vite build succeeds (6 chunks, lib chunk
                      23/23 pass
 packages/agent-tools: typecheck clean; build clean (no test script)
 device-agent:        typecheck clean; build clean (no test script)
-local-runtime:       typecheck clean; build clean; npm test: 76/76 pass
-                     (needs a reachable Postgres for databaseIntegration.test.ts's
-                     arbitrary-db-connector tests — fails cleanly and only
-                     that suite if Postgres is absent, everything else
-                     passes regardless)
+local-runtime:       typecheck clean; build clean; npm test: 83/83 pass
+                     (76 baseline + 7 added by Phase 1 reliability work,
+                     see reliability.test.ts; needs a reachable Postgres for
+                     databaseIntegration.test.ts's arbitrary-db-connector
+                     tests — fails cleanly and only that suite if Postgres
+                     is absent, everything else passes regardless)
 platform/api:        typecheck clean; build clean; npm test: 101/101 pass
                      (needs TEST_DATABASE_URL + schema applied via
                      platform/db/apply.sh)
