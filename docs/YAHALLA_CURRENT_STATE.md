@@ -691,8 +691,16 @@ local-runtime streaming, thinking-state UI, local OCR, local image
 compositing). `claude/yahalla-ai-os-final-unified` is a stale branch 43
 commits behind `main` — not the current source of truth.
 
-## Repo hygiene notes (not fixed here, just recorded)
+## Repo hygiene (Phase 10 cleanup)
 
-Four committed `.backup` files exist and are dead weight:
-`src/App.tsx.backup`, `src/App.css.backup`, `src/index.css.backup`,
-`supabase/functions/yahalla-ai/index.ts.backup`.
+The four stray `.backup` files this doc used to flag as dead weight
+(`src/App.tsx.backup`, `src/App.css.backup`, `src/index.css.backup`,
+`supabase/functions/yahalla-ai/index.ts.backup`) have been removed —
+confirmed via a repo-wide grep that nothing referenced them before
+deleting.
+
+`claude/yahalla-ai-os-final-unified` (a stale branch 43+ commits behind
+`main`) was **not** deleted this pass — deleting a branch is a
+destructive, shared-state git operation outside the scope of an
+autonomous cleanup pass; flagged here for a human to remove if it's truly
+unneeded.
