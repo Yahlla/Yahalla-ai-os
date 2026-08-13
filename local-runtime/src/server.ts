@@ -31,6 +31,7 @@ import {
   setActiveModel,
 } from './modelManager.js'
 import { checkAccess, grantPermission, listPermissions, revokePermission, type AccessLevel, type PermissionScope } from './permissions.js'
+import { canChangeRole, getDeviceRole, setDeviceRole, type DeviceRole } from './roles.js'
 
 export type ServerDeps = {
   db: Db
@@ -445,6 +446,29 @@ export function createHttpServer(deps: ServerDeps) {
         const target = url.searchParams.get('target') ?? '*'
         const access = (url.searchParams.get('access') ?? 'read') as AccessLevel
         return send(res, 200, { allowed: checkAccess(deps.db, scope, target, access) })
+      }
+
+      // Real, code-enforced permission tiers (see roles.ts): GET is always
+      // allowed (a normal-role session can see its own role), but POST is
+      // itself role-gated -- only an owner/trainer session can change the
+      // device's role, so a normal-role session can never promote itself
+      // by calling this endpoint directly, the same as it cannot promote
+      // itself through chat.
+      if (path === '/role' && req.method === 'GET') {
+        return send(res, 200, { role: getDeviceRole(deps.db) })
+      }
+      if (path === '/role' && req.method === 'POST') {
+        const currentRole = getDeviceRole(deps.db)
+        if (!canChangeRole(currentRole)) {
+          return send(res, 403, { success: false, error: `The "${currentRole}" role cannot change this device's role. Only owner/trainer can.` })
+        }
+        const body = await readJsonBody(req)
+        const nextRole = body.role as DeviceRole
+        if (nextRole !== 'normal' && nextRole !== 'owner' && nextRole !== 'trainer') {
+          return send(res, 400, { success: false, error: 'role must be one of: normal, owner, trainer.' })
+        }
+        setDeviceRole(deps.db, nextRole)
+        return send(res, 200, { success: true, role: nextRole })
       }
 
       if (path === '/perception/providers' && req.method === 'GET') {

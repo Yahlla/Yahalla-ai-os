@@ -571,6 +571,53 @@ it was written and is no longer true):
   model would not have on its own, rather than trying to compensate for
   weak hardware with a bigger model.
 
+## Permission tiers (Phase 9, done, tested, real code enforcement)
+
+`local-runtime/src/roles.ts` (covered by `local-runtime/test/roles.test.ts`,
+9 tests: pure role logic plus a real `/chat` + `/role` HTTP round-trip)
+adds three real, code-enforced device roles — not merely described in a
+system prompt, checked fresh from the database before every single tool
+execution in `agentLoop.ts`'s `executeToolNow`, so a role-blocked tool
+call fails before it can do anything regardless of how the request is
+phrased in chat:
+
+- **`normal`**: read-only only — `read_project_file`, `list_project_files`,
+  `get_project_overview`, `git_status`, `git_diff`, `github.read`,
+  `db_list_connections`, `db_query`. Every write/execute/browser-
+  automation/self-development/sub-agent-dispatch tool is blocked at the
+  tool-execution layer, matching exactly the capability list the spec
+  calls out as needing owner/trainer control (project
+  modification, command execution, GitHub writes, browser automation,
+  database writes, self-development, sub-agent dispatch).
+- **`owner`**: full capability — unchanged from every existing tested
+  behavior in this repo. This is also the **default** for a device where
+  no role was ever explicitly set, so upgrading to this phase changes
+  nothing for an existing single-user installation (backward
+  compatibility, verified: the existing full test suite runs completely
+  unmodified against this default and stays green).
+- **`trainer`**: the same functional ceiling as owner today. Kept as a
+  real, distinct, storable value (not an alias for owner) so a genuinely
+  separate feature — an owner/trainer account on a platform-api deployment
+  pushing role changes down to a specific paired device remotely — has
+  something real to plug into later. **That remote-push mechanism is
+  explicitly NOT implemented in this pass** — today `trainer` can only
+  ever be set locally, exactly like `owner`/`normal`. Stated plainly
+  rather than implied, per the standing "never claim planned functionality
+  as implemented" rule for this document.
+- **Self-escalation is blocked in code**: `POST /role` (the only way to
+  change a device's role) itself checks the *current* role first — a
+  `normal`-role session gets a real HTTP 403 and the role does not change,
+  proven by a test that attempts exactly this and then re-reads `/role`
+  to confirm nothing moved.
+- A short, honest addendum is injected into the system prompt only when
+  the device is in `normal` mode, telling the model plainly what's blocked
+  so it stops retrying instead of burning rounds against a wall it cannot
+  see the cause of otherwise.
+- **Not built this pass**: a Settings UI panel for changing the role (the
+  `/role` GET/POST endpoints are real and usable today via any HTTP
+  client or a future UI, just not wired into the Control Center's React
+  UI yet).
+
 ## Strato / external dependency facts (grep-verified, see prior full audit)
 
 - No hardcoded Strato hostname/IP/secret exists anywhere in source; no
@@ -607,14 +654,15 @@ root:               tsc -b clean; vite build succeeds (6 chunks, lib chunk
                      confirmed twice in a row (not part of npm test)
 packages/agent-tools: typecheck clean; build clean (no test script)
 device-agent:        typecheck clean; build clean (no test script)
-local-runtime:       typecheck clean; build clean; npm test: 121/121 pass,
+local-runtime:       typecheck clean; build clean; npm test: 137/137 pass,
                      confirmed stable across repeated runs (76 baseline +
                      7 from Phase 1 reliability.test.ts + 6 from Phase 2
                      selfDev.test.ts + 7 from Phase 3 projectIndex.test.ts
                      + 12 from Phase 4 browser.test.ts + 5 from Phase 5
                      subAgents.test.ts + 8 from the local-runtime↔frontend
-                     connection fix's localPairing.test.ts; needs a
-                     reachable Postgres for databaseIntegration.test.ts's
+                     connection fix's localPairing.test.ts + 7 from Phase 8
+                     hardwareTiering.test.ts + 9 from Phase 9 roles.test.ts;
+                     needs a reachable Postgres for databaseIntegration.test.ts's
                      arbitrary-db-connector tests — fails cleanly and only
                      that suite if Postgres is absent, everything else
                      passes regardless; browser.test.ts's live-browser

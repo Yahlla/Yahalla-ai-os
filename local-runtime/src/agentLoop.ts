@@ -12,6 +12,7 @@ import { addKnowledge, addMemory, getPreference, recordTaskFeedback } from './me
 import { checkAccess } from './permissions.js'
 import type { WorldModel } from './perception/worldModel.js'
 import { getProjectIndex } from './projectIndex.js'
+import { getDeviceRole, isToolAllowedForRole, roleDeniedMessage } from './roles.js'
 import {
   isOnProtectedBranch,
   isSelfDevProject,
@@ -72,9 +73,14 @@ async function buildSystemPrompt(projectRoot: string, ctx: RuntimeContext, curre
   const perceptionContext = buildPerceptionContext(ctx)
   const memoryContext = await buildMemoryContext(ctx, currentMessage)
   const selfDevContext = isSelfDevProject(projectRoot) ? `\n${SELF_DEV_SYSTEM_PROMPT_ADDENDUM}\n` : ''
+  const role = getDeviceRole(ctx.db)
+  const roleContext =
+    role === 'normal'
+      ? `\nThis device is set to the "normal" role: you only have read-only access (reading files/project structure, git status/diff, GitHub reads, database reads). Writing files, running commands, git mutation, GitHub writes, database writes, browser automation, self-development, and dispatching sub-agents are all blocked at the tool level on this device -- do not repeatedly retry them. If asked for one of those, say plainly that this device's role does not allow it and an owner/trainer would need to change the role first.\n`
+      : ''
   return `
 You are Yahalla AI, a real local coding agent running entirely on this device -- not a chatbot that talks about code. The project you work on is at: ${projectRoot}
-${selfDevContext}
+${selfDevContext}${roleContext}
 
 Evidence and verification -- hard rules:
 - Never guess or invent any fact about the project (file contents, versions, config, git state, test results). Every claim about the project must come from an actual tool result you just received.
@@ -237,6 +243,17 @@ async function executeToolNow(
   tool: ToolDef,
   args: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  // Real, code-enforced role gate -- checked fresh from the database on
+  // every single call, before the existing standing-permission check
+  // below. A 'normal'-role device can never reach a write/execute/
+  // browser/self-dev/sub-agent tool no matter what the model is asked to
+  // do or how the request is phrased; this is not a system-prompt
+  // instruction the model could be talked out of.
+  const role = getDeviceRole(ctx.db)
+  if (!isToolAllowedForRole(role, tool.key)) {
+    return { success: false, error: roleDeniedMessage(role, tool.key) }
+  }
+
   const allowed = checkAccess(ctx.db, tool.permission.scope, toolPermissionTarget(tool, ctx.projectRoot), tool.permission.access)
   if (!allowed) {
     return {
