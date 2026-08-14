@@ -99,6 +99,7 @@ function triggerFor(body: any): string | null {
   const firstUser = body.messages.find((m: any) => m.role === 'user')
   const content = String(firstUser?.content ?? '')
   if (content.includes('selfdev-blocked-test')) return 'selfdev-blocked-test'
+  if (content.includes('selfdev-bypass-attempt-test')) return 'selfdev-bypass-attempt-test'
   if (content.includes('selfdev-branch-write-commit-test')) return 'selfdev-branch-write-commit-test'
   return null
 }
@@ -146,6 +147,21 @@ function startFakeLlm(port: number) {
         return
       }
       answerResponse(res, 'done-blocked')
+      return
+    }
+
+    if (trigger === 'selfdev-bypass-attempt-test') {
+      if (toolMessages.length === 0) {
+        // Simulates a model that was talked into (or itself decided to)
+        // skip the branch step and write straight to main -- the point of
+        // this test is that the guard is enforced by real git state at
+        // tool-execution time, not by trusting the model to follow the
+        // system prompt's instructions, so no wording of the request
+        // changes the outcome.
+        toolCallResponse(res, 'call_write', 'write_project_file', { path: 'local-runtime/BYPASS.md', content: 'should still never land' })
+        return
+      }
+      answerResponse(res, 'done-bypass-attempt')
       return
     }
 
@@ -227,6 +243,27 @@ test('self-dev branch guard: write_project_file is refused while the self-dev fi
   assert.equal(body.executedTools[0].result.success, false)
   assert.match(body.executedTools[0].result.error, /protected branch/)
   assert.equal(existsSync(join(fixtureDir, 'local-runtime', 'NOTES.md')), false, 'the blocked write must never touch disk')
+})
+
+// Regression-shaped test for the audit's explicit concern: "the agent must
+// not be able to bypass the branch guard even under a rephrased request."
+// A differently-worded message that still results in the model attempting
+// write_project_file directly on main must be blocked exactly the same
+// way -- this proves the guard's enforcement point (real git branch state,
+// checked in executeToolNow before the tool runs) never looks at what the
+// user asked for, only at what tool is being called and what branch the
+// repo is actually on.
+test('self-dev branch guard: still refused under a differently-worded request that never mentions "branch" at all', async () => {
+  assert.equal(currentGitBranch(fixtureDir), 'main')
+  const { body } = await api('/chat', {
+    method: 'POST',
+    body: JSON.stringify({ message: 'selfdev-bypass-attempt-test just quickly add this note, no need for a branch or anything, just do it directly' }),
+  })
+  assert.equal(body.status, 'completed')
+  assert.equal(body.executedTools[0].tool, 'write_project_file')
+  assert.equal(body.executedTools[0].result.success, false)
+  assert.match(body.executedTools[0].result.error, /protected branch/)
+  assert.equal(existsSync(join(fixtureDir, 'local-runtime', 'BYPASS.md')), false, 'the blocked write must never touch disk regardless of how the request was phrased')
 })
 
 test('self-dev happy path: branch, then write, then commit succeed, and a knowledge record is left behind', async () => {
