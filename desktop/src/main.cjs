@@ -72,9 +72,21 @@ function startRuntime() {
   const projectRoot = process.env.YAHALLA_PROJECT_ROOT || process.cwd()
   lastStartedAt = Date.now()
   notifyRenderer('yahalla:runtime-status', { status: restartAttempts > 0 ? 'restarting' : 'starting' })
+  // process.execPath inside Electron's main process is the Electron binary
+  // itself, not a plain Node binary -- spawning it directly on a script
+  // path (with no other flag) launches ANOTHER full Electron/Chromium app
+  // instance trying to run that script as its entry point, which fails
+  // outright in a real packaged app (this was only ever verified by
+  // TypeScript compiling cleanly before this audit, never by actually
+  // running Electron: `electron_main_delegate.cc: Running as root without
+  // --no-sandbox is not supported` / a silent crash-loop otherwise --
+  // the real local-runtime process never started, so the whole desktop
+  // app's AI would have been non-functional). ELECTRON_RUN_AS_NODE=1 is
+  // Electron's own documented mechanism for exactly this case: the child
+  // runs as plain Node (require(), no Chromium, no app lifecycle) instead.
   runtimeProcess = spawn(process.execPath, [RUNTIME_ENTRY, `--project=${projectRoot}`], {
     stdio: 'inherit',
-    env: process.env,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
   })
   runtimeProcess.on('exit', (code) => {
     console.log(`[desktop] local-runtime exited with code ${code}`)
