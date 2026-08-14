@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { newId, openDb } from '../src/db.js'
 import { checkAccess, grantPermission, listPermissions, revokePermission } from '../src/permissions.js'
@@ -149,4 +152,35 @@ test('checkAccess: an existing, pre-fix, un-normalized row in the database (trai
     `INSERT INTO permissions (id, scope, target, access, updated_at) VALUES (?, 'project', '/Users/mahmoudal/Yahalla-ai-os/', 'read', datetime('now'))`,
   ).run(newId())
   assert.equal(checkAccess(db, 'project', '/Users/mahmoudal/Yahalla-ai-os', 'read'), true)
+})
+
+// Confirmed against a real device (not a guess): the actually-reported
+// denial traced to macOS's case-insensitive-but-case-preserving APFS --
+// the permission was granted for ".../Yahalla-ai-os" (capital Y) while
+// the live process's projectRoot resolved to ".../yahalla-ai-os"
+// (lowercase), the exact same real directory on disk, string-mismatched.
+// This sandbox's filesystem is case-sensitive (Linux), so the identical
+// case-folding cannot be reproduced directly here -- but
+// normalizeProjectTarget's fix for it is realpathSync.native, i.e.
+// "resolve to whatever the OS calls the canonical path for this real
+// filesystem entry," and that same mechanism is fully exercised and
+// provable on any platform through a symlink: a grant made via a symlink
+// path must match a query made via the real path it points to (and vice
+// versa), because both canonicalize to the identical on-disk target --
+// which is exactly the class of "cosmetically different string, same
+// real directory" bug this fix closes.
+test('checkAccess: a grant through a symlink matches a query through the real path it points to (proves realpath canonicalization, the same mechanism that fixes macOS case-insensitive mismatches)', () => {
+  const db = openDb(':memory:')
+  const base = mkdtempSync(join(tmpdir(), 'yahalla-permtest-'))
+  const realDir = join(base, 'real-project')
+  const linkDir = join(base, 'link-to-project')
+  mkdirSync(realDir)
+  symlinkSync(realDir, linkDir)
+
+  grantPermission(db, 'project', linkDir, 'read')
+  assert.equal(checkAccess(db, 'project', realDir, 'read'), true, 'a grant via the symlink path must cover the real path it resolves to')
+
+  const db2 = openDb(':memory:')
+  grantPermission(db2, 'project', realDir, 'write')
+  assert.equal(checkAccess(db2, 'project', linkDir, 'write'), true, 'a grant via the real path must also cover a query made through a symlink to it')
 })

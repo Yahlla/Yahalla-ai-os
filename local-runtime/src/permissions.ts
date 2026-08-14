@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import type { Db } from './db.js'
 import { newId } from './db.js'
@@ -44,7 +45,25 @@ const ACCESS_RANK: Record<AccessLevel, number> = { none: 0, read: 1, write: 2, e
 function normalizeProjectTarget(target: string): string {
   if (target === '*') return target
   const resolved = resolve(target)
-  return resolved.length > 1 && resolved.endsWith(sep) ? resolved.slice(0, -1) : resolved
+  const stripped = resolved.length > 1 && resolved.endsWith(sep) ? resolved.slice(0, -1) : resolved
+  // Confirmed against a real device, not guessed: on macOS's default
+  // case-insensitive-but-case-preserving APFS, "/Users/x/Yahalla-ai-os"
+  // and "/Users/x/yahalla-ai-os" are the SAME real directory on disk, but
+  // resolve() never touches the filesystem, so it never corrects case --
+  // a permission granted with one casing silently never matches
+  // ctx.projectRoot resolved with the other. realpathSync.native asks the
+  // OS for the canonical on-disk path (case included), so both a grant
+  // and a live projectRoot converge on the identical string regardless of
+  // which casing either one was typed/configured with. On a case-sensitive
+  // filesystem (Linux) this is a no-op beyond what resolve() already did.
+  // Falls back to the resolve()-only form when the path doesn't exist yet
+  // (a grant can be written before its directory exists; test suites use
+  // synthetic paths) -- never throws.
+  try {
+    return realpathSync.native(stripped)
+  } catch {
+    return stripped
+  }
 }
 
 // The agent gets NOTHING by default. Every category of access -- even
