@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { openDb } from '../src/db.js'
+import { newId, openDb } from '../src/db.js'
 import { checkAccess, grantPermission, listPermissions, revokePermission } from '../src/permissions.js'
 
 // Direct, dedicated unit coverage for permissions.ts's matching logic
@@ -96,4 +96,57 @@ test('grantPermission upserts -- granting the same scope+target twice updates ac
   const rows = listPermissions(db).filter((p) => p.scope === 'project' && p.target === '/proj')
   assert.equal(rows.length, 1, 'must not create a duplicate row for the same scope+target')
   assert.equal(rows[0]!.access, 'write')
+})
+
+// --- Regression tests for a real reported bug class: "there is a
+// permission record for exactly this project, yet the tool is still
+// denied." Root cause: project-scope targets were compared as raw
+// strings, with zero normalization -- a grant written with a trailing
+// slash, a redundant "./" segment, or any other cosmetically-different
+// form of the identical absolute path would never match ctx.projectRoot,
+// even though a human reading both values would call them "the same
+// project." normalizeProjectTarget() (permissions.ts) fixes this.
+
+test('checkAccess: a granted target with a trailing slash still matches a query without one', () => {
+  const db = openDb(':memory:')
+  grantPermission(db, 'project', '/home/user/repo/', 'read')
+  assert.equal(checkAccess(db, 'project', '/home/user/repo', 'read'), true)
+})
+
+test('checkAccess: a query target with a trailing slash still matches a grant without one', () => {
+  const db = openDb(':memory:')
+  grantPermission(db, 'project', '/home/user/repo', 'read')
+  assert.equal(checkAccess(db, 'project', '/home/user/repo/', 'read'), true)
+})
+
+test('checkAccess: a redundant "./" or repeated-separator form of the same path still matches', () => {
+  const db = openDb(':memory:')
+  grantPermission(db, 'project', '/home/user/repo', 'write')
+  assert.equal(checkAccess(db, 'project', '/home/user/./repo', 'write'), true)
+  assert.equal(checkAccess(db, 'project', '/home//user//repo', 'write'), true)
+})
+
+test('grantPermission stores project-scope targets in normalized form, so listPermissions shows the canonical path regardless of how it was granted', () => {
+  const db = openDb(':memory:')
+  grantPermission(db, 'project', '/home/user/repo/', 'write')
+  const rows = listPermissions(db).filter((p) => p.scope === 'project')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]!.target, '/home/user/repo', 'the trailing slash must be stripped at storage time')
+})
+
+// The most important case for a real, already-affected install: a
+// permission row that predates this fix (or was inserted directly into
+// the database by hand, exactly as the reported bug described) with an
+// un-normalized target must still match once this fix is deployed --
+// comparison-time normalization in bestMatch, not just grant-time, is
+// what makes this possible without any data migration.
+test('checkAccess: an existing, pre-fix, un-normalized row in the database (trailing slash) still matches a clean query after this fix', () => {
+  const db = openDb(':memory:')
+  // Bypasses grantPermission deliberately, to simulate a row written by
+  // an older runtime version (or by hand) before normalizeProjectTarget
+  // existed -- exactly the shape of the reported bug.
+  db.prepare(
+    `INSERT INTO permissions (id, scope, target, access, updated_at) VALUES (?, 'project', '/Users/mahmoudal/Yahalla-ai-os/', 'read', datetime('now'))`,
+  ).run(newId())
+  assert.equal(checkAccess(db, 'project', '/Users/mahmoudal/Yahalla-ai-os', 'read'), true)
 })
