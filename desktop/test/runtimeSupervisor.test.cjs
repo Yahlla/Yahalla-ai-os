@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict')
 const { createServer } = require('node:http')
 const { test, after, before } = require('node:test')
-const { computeRestartDecision, runtimeApi, ensureModelReady, MAX_RESTART_ATTEMPTS, HEALTHY_UPTIME_MS } = require('../src/runtimeSupervisor.cjs')
+const { computeRestartDecision, runtimeApi, ensureModelReady, trustProjectRoot, MAX_RESTART_ATTEMPTS, HEALTHY_UPTIME_MS } = require('../src/runtimeSupervisor.cjs')
 
 // --- computeRestartDecision: pure function, no server needed.
 
@@ -191,6 +191,36 @@ test('ensureModelReady: an already-downloaded model skips straight to activate/s
   } finally {
     server.close()
   }
+})
+
+// --- trustProjectRoot: audit fix -- launching the desktop app pointed at
+// a project folder is this device's real consent signal, but nothing
+// previously turned that into an actual /permissions/grant call, so every
+// project-scoped tool was permission-denied on every real install. This
+// proves main.cjs's new background call actually reaches the real route
+// with the real body local-runtime's server.ts expects.
+
+test('trustProjectRoot calls POST /project/trust with a write access request', async () => {
+  const port = 18436
+  const calls = []
+  const server = await startFakeRuntimeServer(port, {
+    'POST /project/trust': (body) => {
+      calls.push(body)
+      return { status: 200, data: { success: true, projectRoot: '/fixture/project', permission: { access: 'write' } } }
+    },
+  })
+  try {
+    const result = await trustProjectRoot(`http://127.0.0.1:${port}`, 'tok')
+    assert.equal(result.ok, true)
+    assert.deepEqual(calls, [{ access: 'write' }])
+  } finally {
+    server.close()
+  }
+})
+
+test('trustProjectRoot never throws when the runtime is unreachable', async () => {
+  const result = await trustProjectRoot('http://127.0.0.1:1', 'tok')
+  assert.equal(result.ok, false)
 })
 
 test('ensureModelReady: a download failure reports a clean error phase, not a crash', async () => {

@@ -28,7 +28,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openDb } from '../local-runtime/dist/src/db.js'
-import { grantPermission } from '../local-runtime/dist/src/permissions.js'
 import { LocalModelProcess } from '../local-runtime/dist/src/llm.js'
 import { createHttpServer } from '../local-runtime/dist/src/server.js'
 
@@ -82,8 +81,14 @@ async function main() {
   const fakeLlmPort = 18420
   const fakeLlm = await startFakeLlm(fakeLlmPort)
 
+  // Deliberately NO grantPermission call here: a real fresh install starts
+  // with an empty permissions table (see local-runtime/src/db.ts's
+  // schema), and the audit fix under test is that pairWithLocalRuntime()
+  // now calls the real /project/trust route itself right after pairing --
+  // this harness proves that real browser-driven flow is what makes the
+  // project-scoped read_project_file tool call below succeed, not a
+  // pre-seeded permission the real product never creates.
   const db = openDb(':memory:')
-  grantPermission(db, 'project', projectDir, 'read')
 
   const modelProcess = new LocalModelProcess(fakeLlmPort)
   // Force isRunning()/baseUrl to point at our fake server without

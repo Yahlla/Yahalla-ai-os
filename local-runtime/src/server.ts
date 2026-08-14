@@ -448,6 +448,32 @@ export function createHttpServer(deps: ServerDeps) {
         return send(res, 200, { allowed: checkAccess(deps.db, scope, target, access) })
       }
 
+      // The one-time "trust this project folder" step referenced by
+      // permissions.ts's grantPermission comment, but that (until now) no
+      // caller anywhere in this repo actually implemented -- meaning every
+      // project-scoped tool (get_project_overview, read_project_file, ...)
+      // was permission-denied on every fresh install with no way to fix it
+      // short of hand-crafting a /permissions/grant call with a target that
+      // happened to exactly match this process's resolved project root.
+      // These two routes always resolve the target from the server's own
+      // ctxFrom() rather than trusting a client-supplied path, so the
+      // granted permission's target can never drift from what
+      // checkAccess() actually looks up during tool execution.
+      if (path === '/project/status' && req.method === 'GET') {
+        const ctx = ctxFrom(deps, embodiment, perception)
+        return send(res, 200, {
+          projectRoot: ctx.projectRoot,
+          trusted: checkAccess(deps.db, 'project', ctx.projectRoot, 'read'),
+        })
+      }
+      if (path === '/project/trust' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const access: AccessLevel = body.access === 'read' ? 'read' : 'write'
+        const ctx = ctxFrom(deps, embodiment, perception)
+        const permission = grantPermission(deps.db, 'project', ctx.projectRoot, access)
+        return send(res, 200, { success: true, projectRoot: ctx.projectRoot, permission })
+      }
+
       // Real, code-enforced permission tiers (see roles.ts): GET is always
       // allowed (a normal-role session can see its own role), but POST is
       // itself role-gated -- only an owner/trainer session can change the

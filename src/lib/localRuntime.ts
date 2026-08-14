@@ -100,6 +100,29 @@ export async function pairWithLocalRuntime(baseUrl: string = DEFAULT_LOCAL_RUNTI
     const pairing: StoredPairing = { baseUrl: data.baseUrl, authToken: data.authToken }
     window.localStorage.setItem(PAIRING_STORAGE_KEY, JSON.stringify(pairing))
     cachedInfo = pairing
+
+    // The one-time "trust this project folder" step (see server.ts's
+    // /project/trust): this pairing action -- an explicit click, from a
+    // tab already running at a known Yahalla origin, on the same machine
+    // the runtime is on -- is the real consent signal, the same way
+    // launching the desktop app pointed at a project is for the Electron
+    // path (desktop/src/main.cjs). Without this, every project-scoped
+    // tool (get_project_overview, read_project_file, ...) stays
+    // permission-denied after pairing with no further way to fix it from
+    // this tab. Best-effort: a failure here still leaves pairing itself
+    // successful, and the real permission error (if any) surfaces the
+    // next time a project tool actually runs.
+    try {
+      await fetch(`${pairing.baseUrl}/project/trust`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pairing.authToken}` },
+        body: JSON.stringify({ access: 'write' }),
+        signal: AbortSignal.timeout(5000),
+      })
+    } catch {
+      // non-fatal -- see comment above
+    }
+
     return { ok: true }
   } catch (error) {
     return {

@@ -44,6 +44,20 @@ async function runtimeApi(baseUrl, authToken, path, init = {}) {
   }
 }
 
+// The one-time "trust this project folder" step that local-runtime's
+// /project/trust route implements server-side (see server.ts): launching
+// the desktop app pointed at a project folder (main.cjs's --project=
+// argument) IS this device's real consent signal, so this grants it
+// automatically once the runtime is reachable, rather than leaving every
+// project-scoped tool permanently permission-denied the way it was before
+// this route existed (nothing anywhere previously called
+// /permissions/grant with scope=project on a real user's machine).
+// Idempotent -- grantPermission's ON CONFLICT upsert makes calling this
+// on every launch harmless.
+async function trustProjectRoot(baseUrl, authToken) {
+  return runtimeApi(baseUrl, authToken, '/project/trust', { method: 'POST', body: JSON.stringify({ access: 'write' }) })
+}
+
 // First-run (and every-run) model setup. Uses local-runtime's own
 // already-tested REST endpoints (hardware detection, model catalog/
 // download/activate, runtime start) rather than reimplementing any of
@@ -120,4 +134,4 @@ async function ensureModelReady(baseUrl, authToken, notify) {
   notify({ phase: 'ready' })
 }
 
-module.exports = { computeRestartDecision, runtimeApi, ensureModelReady, MAX_RESTART_ATTEMPTS, HEALTHY_UPTIME_MS }
+module.exports = { computeRestartDecision, runtimeApi, trustProjectRoot, ensureModelReady, MAX_RESTART_ATTEMPTS, HEALTHY_UPTIME_MS }

@@ -10,7 +10,7 @@ const { spawn } = require('node:child_process')
 const { existsSync, readFileSync } = require('node:fs')
 const { homedir } = require('node:os')
 const { join } = require('node:path')
-const { computeRestartDecision, ensureModelReady } = require('./runtimeSupervisor.cjs')
+const { computeRestartDecision, ensureModelReady, trustProjectRoot } = require('./runtimeSupervisor.cjs')
 
 // In the monorepo (dev), local-runtime and the frontend build live as
 // sibling directories. In a packaged app there is no monorepo -- everything
@@ -138,7 +138,16 @@ async function createWindow() {
   // background browser-model warm-up already does for the web tier.
   if (ready) {
     const cfg = readRuntimeConfig()
-    if (cfg) void ensureModelReady(`http://127.0.0.1:${cfg.port}`, cfg.authToken, (payload) => notifyRenderer('yahalla:model-status', payload))
+    if (cfg) {
+      const runtimeBaseUrl = `http://127.0.0.1:${cfg.port}`
+      // Grant project trust before model setup -- both are independent
+      // background steps, but trust is what makes the project-scoped tools
+      // (get_project_overview, read_project_file, ...) usable the moment
+      // the model itself is ready, instead of leaving a second, invisible
+      // "permission denied" surprise after model setup completes.
+      void trustProjectRoot(runtimeBaseUrl, cfg.authToken)
+      void ensureModelReady(runtimeBaseUrl, cfg.authToken, (payload) => notifyRenderer('yahalla:model-status', payload))
+    }
   }
 }
 
