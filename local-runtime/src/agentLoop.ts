@@ -10,6 +10,8 @@ import { chatCompletion, chatCompletionStreamWithRetry, chatCompletionWithRetry 
 import { browserClick, browserClose, browserOpen, browserRead, browserType } from './browser.js'
 import { addKnowledge, addMemory, getPreference, recordTaskFeedback } from './memory.js'
 import { checkAccess } from './permissions.js'
+import { compactMessagesForBudget, conversationBudgetChars, truncateToolResultForContext } from './contextBudget.js'
+import { recommendedContextSize } from './modelManager.js'
 import type { WorldModel } from './perception/worldModel.js'
 import { getProjectIndex } from './projectIndex.js'
 import { getDeviceRole, isToolAllowedForRole, roleDeniedMessage } from './roles.js'
@@ -340,8 +342,10 @@ Never guess or invent a fact -- every claim must come from an actual tool result
   ]
   const executedTools: SubAgentLoopResult['executedTools'] = []
   const llmTools = buildOpenAITools().filter((t) => t.function.name !== 'dispatch_subagent' && profile.allowedToolKeys.includes(t.function.name))
+  const budgetChars = conversationBudgetChars(recommendedContextSize(ctx.modelKey))
 
   for (let round = 0; round < profile.maxRounds; round++) {
+    messages.splice(0, messages.length, ...compactMessagesForBudget(messages, budgetChars))
     ctx.embodiment.transition('THINKING', `[${profile.name}] working on: ${task.slice(0, 80)}`)
     const result = await chatCompletionWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages, tools: llmTools })
     if (!result.ok) return { success: false, error: result.errorMessage, executedTools }
@@ -398,7 +402,7 @@ Never guess or invent a fact -- every claim must come from an actual tool result
 
       const toolResult = await executeToolNow(ctx, tool, args)
       executedTools.push({ tool: tool.key, arguments: args, result: toolResult })
-      messages.push({ role: 'tool', tool_call_id: call.id, name: tool.key, content: JSON.stringify(toolResult) })
+      messages.push({ role: 'tool', tool_call_id: call.id, name: tool.key, content: JSON.stringify(truncateToolResultForContext(toolResult)) })
     }
   }
 
@@ -468,8 +472,19 @@ async function runLoop(
 ): Promise<ChatResult> {
   const maxRounds = getPreference<number>(ctx.db, 'max_tool_rounds') ?? 15
   const llmTools = buildOpenAITools()
+  // Real context budgeting, not just a bigger --ctx-size: derived from
+  // *this* active model's real context window (see modelManager.ts's
+  // recommendedContextSize/CONTEXT_SIZE_BY_TIER), so a task that runs
+  // several tool rounds in a row (get_project_overview, then
+  // list_project_files, then a few read_project_file calls -- exactly the
+  // workflow the system prompt above tells the model to follow) gets
+  // compacted before it silently exceeds what the model can actually
+  // accept, instead of failing with an opaque LLM error only after the
+  // request was already too large to send.
+  const budgetChars = conversationBudgetChars(recommendedContextSize(ctx.modelKey))
 
   for (let round = 0; round < maxRounds; round++) {
+    state.messages = compactMessagesForBudget(state.messages, budgetChars)
     ctx.embodiment.transition('THINKING', round === 0 ? 'Analyzing request' : 'Continuing analysis')
 
     // onToken (only ever set by runChat, not generatePlan/resumeApproval)
@@ -580,7 +595,9 @@ async function runLoop(
           role: 'tool',
           tool_call_id: call.id,
           name: tool.key,
-          content: JSON.stringify({ ...cached, note: 'Duplicate call in the same round -- reusing the prior result instead of re-executing.' }),
+          content: JSON.stringify(
+            truncateToolResultForContext({ ...cached, note: 'Duplicate call in the same round -- reusing the prior result instead of re-executing.' }),
+          ),
         })
         continue
       }
@@ -608,8 +625,12 @@ async function runLoop(
       state.executedTools.push({ tool: tool.key, arguments: args, result: toolResult })
       seenThisRound.set(dedupKey, toolResult)
 
+      // annotateRepeatedFailure's signature/executedTools bookkeeping above
+      // always sees the real, untruncated result -- only what actually goes
+      // to the model is bounded, so failure fingerprinting and the HTTP
+      // response's executedTools[].result stay exact.
       const reportedResult = annotateRepeatedFailure(state, tool, args, toolResult)
-      state.messages.push({ role: 'tool', tool_call_id: call.id, name: tool.key, content: JSON.stringify(reportedResult) })
+      state.messages.push({ role: 'tool', tool_call_id: call.id, name: tool.key, content: JSON.stringify(truncateToolResultForContext(reportedResult)) })
     }
   }
 
