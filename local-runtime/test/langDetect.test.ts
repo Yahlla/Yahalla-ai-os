@@ -26,6 +26,15 @@ test('Russian (Cyrillic) is detected', () => {
   assert.equal(detectLanguage('Здравствуйте, где сейчас находится моя посылка?').code, 'ru')
 })
 
+// The root frontend copy already covers German; local-runtime's own copy
+// (a deliberate duplicate, per the module's own header comment) had no
+// direct test of it -- added for parity, and because German is one of the
+// three languages this production-certification pass explicitly asked to
+// verify (Arabic/German/English).
+test('German is detected via marker words', () => {
+  assert.equal(detectLanguage('Hallo, meine Bestellung ist leider nicht angekommen und ich bin sehr besorgt.').code, 'de')
+})
+
 test('a caller-supplied fallback overrides the built-in default', () => {
   assert.equal(detectLanguage('123', { code: 'en', name: 'English', confidence: 0 }).code, 'en')
 })
