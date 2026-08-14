@@ -5,6 +5,7 @@ import { EmbodimentStateMachine } from './embodiment/stateMachine.js'
 import { LocalModelProcess } from './llm.js'
 import { getActiveModel, recommendedContextSize } from './modelManager.js'
 import { PerceptionManager } from './perception/manager.js'
+import { grantPermission } from './permissions.js'
 import { ctxFrom, createHttpServer } from './server.js'
 import { startTaskPoller } from './taskPoller.js'
 
@@ -12,12 +13,21 @@ async function main() {
   const projectRootArg = process.argv.find((a) => a.startsWith('--project='))?.split('=')[1]
 
   const config = loadOrCreateConfig()
+  const db = openDb()
+
   if (projectRootArg) {
     config.projectRoot = projectRootArg
     saveConfig(config)
+    // Same audit fix as the Electron shell (runtimeSupervisor.cjs's
+    // trustProjectRoot) and the browser-pairing flow
+    // (localRuntime.ts's pairWithLocalRuntime): passing --project=
+    // explicitly on the command line IS this device's real consent for
+    // this specific runtime-only path -- nobody else grants it here, so
+    // without this every project-scoped tool would stay permission-denied
+    // forever on a CLI-only install, the same gap that existed for every
+    // launch path before this audit.
+    grantPermission(db, 'project', projectRootArg, 'write')
   }
-
-  const db = openDb()
   const modelProcess = new LocalModelProcess(8766)
   const embodiment = new EmbodimentStateMachine()
   const perception = new PerceptionManager(db)
