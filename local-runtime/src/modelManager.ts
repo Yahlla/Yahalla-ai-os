@@ -75,20 +75,34 @@ export function recommendCatalogEntry(hardware: HardwareInfo): ModelCatalogEntry
 // not safer than a chosen one here, it is just undefined behavior that can
 // silently vary across installs and llama.cpp versions.
 //
-// These values are deliberately conservative and were not benchmarked
-// against real hardware in this environment (no llama-server binary is
-// installed in this sandbox to measure actual RSS against). small matches
-// hardware.ts's computeRecommendedTier fallback tier, which covers
-// everything below the medium floor -- including an 8GB-RAM machine, the
-// specific case this repository's audit was asked to check -- so it gets
-// the smallest, most conservative window. medium/large both already
-// require 16GB+/32GB+ RAM respectively (computeRecommendedTier), so they
-// get more headroom. Revisit with real measurements once a llama-server
-// binary is actually available to profile against.
+// These values are deliberately conservative. small matches hardware.ts's
+// computeRecommendedTier fallback tier, which covers everything below the
+// medium floor -- including an 8GB-RAM machine, the specific case this
+// repository's audit was asked to check -- so it gets the smallest, most
+// conservative window. medium already requires 16GB+ RAM
+// (computeRecommendedTier) and was not benchmarked against real hardware
+// in this development environment (no llama-server binary was available
+// here to profile against), so it keeps its original conservative value;
+// revisit medium with real measurements if/when they become available.
+//
+// large (32GB+ RAM, 8+ cores -- computeRecommendedTier) WAS benchmarked
+// against a real device: a real machine in that tier ran a 3B-parameter
+// Q4_K_M model (n_ctx_train=32768, so 16384 is well within the
+// checkpoint's own trained range) at --ctx-size 16384 with a clean health
+// check and a successful direct completion. Doubled from 8192 to 16384 on
+// that evidence -- this only affects the large tier; small/medium, which
+// have no such evidence behind them, are untouched. If a future large-tier
+// device turns out not to have the RAM/VRAM headroom this assumes,
+// recommendedContextSize() is the single place to adjust, so
+// agentLoop.ts's context-budgeting (which calls this same function) never
+// drifts out of sync with what llama-server was actually started with --
+// see llm.ts's LocalModelProcess.start(), the only other caller, which
+// receives this value as --ctx-size and must never hardcode a
+// context-size flag of its own, or the two would silently disagree.
 export const CONTEXT_SIZE_BY_TIER: Record<ModelCatalogEntry['tier'], number> = {
   small: 4096,
   medium: 8192,
-  large: 8192,
+  large: 16384,
 }
 
 export function recommendedContextSize(modelKey: string): number {

@@ -199,6 +199,20 @@ test('health endpoint requires no auth and reports runtime status', async () => 
   assert.equal(body.runtime, 'local')
 })
 
+// Real diagnostic gap this audit closed: without llm_base_url in the
+// response, the only way to see which port/process local-runtime is
+// actually talking to was a second request to /runtime/status --
+// /health, the endpoint someone checks first, said nothing about it. That
+// gap is exactly how a real report happened where an independently
+// started llama-server on a different port (its own conventional
+// default, unrelated to this runtime's managed instance) looked
+// indistinguishable from "the" local LLM in a spot-check.
+test('health endpoint reports which port/process it is actually checking (llm_base_url), so a stray llama-server on a different port cannot be mistaken for the managed one', async () => {
+  const response = await fetch(`${baseUrl}/health`)
+  const body = (await response.json()) as any
+  assert.equal(body.llm_base_url, 'http://127.0.0.1:18081', "must reflect this runtime's own managed process, not any other port")
+})
+
 test('unauthenticated requests to protected routes are rejected', async () => {
   const response = await fetch(`${baseUrl}/tasks`)
   assert.equal(response.status, 401)

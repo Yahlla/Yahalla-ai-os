@@ -137,11 +137,25 @@ function startFakePlatformApi(port: number, opts: { expectedCode: string; device
 }
 
 let projectDir: string
+let dataRootDir: string
 let db: Db
 let fakeLlm: Server
 let modelProcess: LocalModelProcess
 
+// This is the only test file in the suite that calls the real
+// /device/pair and /device/unpair HTTP endpoints (see the last test
+// below), and those endpoints call the real saveConfig() (server.ts),
+// which -- confirmed by a real report from an actual dev machine, not a
+// hypothetical -- writes straight to the production
+// ~/.yahalla/runtime/config.json with zero test isolation, since
+// paths.ts's dataRoot() used to be a module-level constant computed once
+// at import time with no way for a test to redirect it. Pointing
+// YAHALLA_DATA_ROOT_OVERRIDE at an isolated temp directory for the
+// duration of this file only is what actually stops this suite from ever
+// touching a real user's real runtime state again.
 before(() => {
+  dataRootDir = mkdtempSync(join(tmpdir(), 'yahalla-runtime-data-root-test-'))
+  process.env.YAHALLA_DATA_ROOT_OVERRIDE = dataRootDir
   projectDir = mkdtempSync(join(tmpdir(), 'yahalla-runtime-dispatch-test-'))
   writeFileSync(join(projectDir, 'package.json'), JSON.stringify({ name: 'fixture', version: '0.0.0' }))
   db = openDb(':memory:')
@@ -149,7 +163,9 @@ before(() => {
 })
 
 after(() => {
+  delete process.env.YAHALLA_DATA_ROOT_OVERRIDE
   rmSync(projectDir, { recursive: true, force: true })
+  rmSync(dataRootDir, { recursive: true, force: true })
 })
 
 function buildCtx(dbInstance: Db, llmPort: number) {

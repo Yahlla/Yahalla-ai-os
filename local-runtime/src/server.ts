@@ -120,6 +120,16 @@ export function createHttpServer(deps: ServerDeps) {
         runtime: 'local',
         model: active ? { key: active.key, name: active.name } : null,
         llm_reachable: llmUp,
+        // Real audit finding: without this, diagnosing "which llama-server
+        // process is local-runtime actually talking to" required a second
+        // request to /runtime/status -- the endpoint someone would
+        // naturally check first (/health) didn't say. That gap is exactly
+        // how an independently-started llama-server on a different port
+        // (e.g. llama-server's own conventional default, 8080, if it was
+        // ever launched by hand outside this runtime) can be mistaken for
+        // the one this runtime manages: both answer real requests, so a
+        // spot-check against the wrong port still "looks" healthy.
+        llm_base_url: deps.modelProcess.baseUrl,
       })
       return
     }
