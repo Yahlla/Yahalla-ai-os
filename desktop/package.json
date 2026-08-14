@@ -2,6 +2,7 @@
   "name": "@yahalla/desktop",
   "version": "0.1.0",
   "private": true,
+  "author": "Yahalla AI",
   "description": "Yahalla AI desktop shell: launches the local Agent Runtime as a child process and loads the Control Center against it. No cloud LLM, no tunnel -- this window and the AI it talks to both run on this machine.",
   "main": "src/main.cjs",
   "scripts": {
@@ -20,6 +21,7 @@
     "directories": {
       "output": "dist-electron"
     },
+    "publish": null,
     "files": [
       "src/**/*",
       "package.json"
