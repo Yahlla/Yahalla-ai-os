@@ -27,6 +27,7 @@ import {
   listModels,
   MODEL_CATALOG,
   recommendCatalogEntry,
+  recommendedContextSize,
   registerModel,
   setActiveModel,
 } from './modelManager.js'
@@ -192,9 +193,10 @@ export function createHttpServer(deps: ServerDeps) {
           return send(res, 400, { success: false, error: 'No active, downloaded model. Download and activate one first.' })
         }
         const binary = findLlamaServerBinary()
-        deps.modelProcess.start(binary, active.file_path)
+        const ctxSize = recommendedContextSize(active.key)
+        deps.modelProcess.start(binary, active.file_path, ['--ctx-size', String(ctxSize)])
         const ready = await deps.modelProcess.waitUntilReady(60_000)
-        return send(res, ready ? 200 : 504, { success: ready, base_url: deps.modelProcess.baseUrl })
+        return send(res, ready ? 200 : 504, { success: ready, base_url: deps.modelProcess.baseUrl, ctx_size: ctxSize })
       }
 
       if (path === '/runtime/stop' && req.method === 'POST') {

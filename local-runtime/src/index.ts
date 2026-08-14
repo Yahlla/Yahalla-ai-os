@@ -3,7 +3,7 @@ import { loadOrCreateConfig, saveConfig } from './config.js'
 import { openDb } from './db.js'
 import { EmbodimentStateMachine } from './embodiment/stateMachine.js'
 import { LocalModelProcess } from './llm.js'
-import { getActiveModel } from './modelManager.js'
+import { getActiveModel, recommendedContextSize } from './modelManager.js'
 import { PerceptionManager } from './perception/manager.js'
 import { ctxFrom, createHttpServer } from './server.js'
 import { startTaskPoller } from './taskPoller.js'
@@ -48,7 +48,7 @@ async function main() {
   if (active) {
     try {
       const { findLlamaServerBinary } = await import('./llm.js')
-      modelProcess.start(findLlamaServerBinary(), active.file_path!)
+      modelProcess.start(findLlamaServerBinary(), active.file_path!, ['--ctx-size', String(recommendedContextSize(active.key))])
     } catch (error) {
       console.error('[yahalla-runtime] could not autostart local model:', error)
     }

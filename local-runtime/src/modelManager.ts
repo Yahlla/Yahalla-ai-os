@@ -65,6 +65,37 @@ export function recommendCatalogEntry(hardware: HardwareInfo): ModelCatalogEntry
   return match ?? MODEL_CATALOG[0]
 }
 
+// Audit fix: previously nothing anywhere ever passed --ctx-size (or any
+// extraArgs at all) to llama-server (see llm.ts's LocalModelProcess.start),
+// so the running process's actual context window was whatever that
+// specific llama.cpp build happens to default to -- not a fixed, safe,
+// version-independent number, since recent llama-server builds sometimes
+// default n_ctx from the model's own trained maximum (32K+ for these Qwen2.5
+// checkpoints) rather than a small fixed value. "No explicit setting" is
+// not safer than a chosen one here, it is just undefined behavior that can
+// silently vary across installs and llama.cpp versions.
+//
+// These values are deliberately conservative and were not benchmarked
+// against real hardware in this environment (no llama-server binary is
+// installed in this sandbox to measure actual RSS against). small matches
+// hardware.ts's computeRecommendedTier fallback tier, which covers
+// everything below the medium floor -- including an 8GB-RAM machine, the
+// specific case this repository's audit was asked to check -- so it gets
+// the smallest, most conservative window. medium/large both already
+// require 16GB+/32GB+ RAM respectively (computeRecommendedTier), so they
+// get more headroom. Revisit with real measurements once a llama-server
+// binary is actually available to profile against.
+export const CONTEXT_SIZE_BY_TIER: Record<ModelCatalogEntry['tier'], number> = {
+  small: 4096,
+  medium: 8192,
+  large: 8192,
+}
+
+export function recommendedContextSize(modelKey: string): number {
+  const entry = MODEL_CATALOG.find((m) => m.key === modelKey)
+  return entry ? CONTEXT_SIZE_BY_TIER[entry.tier] : CONTEXT_SIZE_BY_TIER.small
+}
+
 export function registerModel(db: Db, key: string, name: string, url: string, sha256?: string): ModelRow {
   const id = newId()
   db.prepare(

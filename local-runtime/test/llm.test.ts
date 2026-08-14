@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import { createServer as createFakeHttpServer } from 'node:http'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
-import { chatCompletionStream, isLlamaServerInstalled } from '../src/llm.js'
+import { chatCompletionStream, isLlamaServerInstalled, LocalModelProcess } from '../src/llm.js'
 
 test('isLlamaServerInstalled returns true for a real, runnable binary', () => {
   // node itself always exists and supports --version -- a stand-in for
@@ -105,6 +108,44 @@ test('chatCompletionStream surfaces a clean error on a non-200 response', async 
       assert.match(result.errorMessage, /HTTP 500/)
     },
   )
+})
+
+// LocalModelProcess.start: audit fix verification (Phase 3, ctx-size).
+// Proves extraArgs (in particular --ctx-size) really reach the spawned
+// process argv -- not just that the call compiles -- by spawning a real
+// executable script that records its own argv to a file, the same way a
+// real llama-server binary would receive them.
+test('LocalModelProcess.start forwards extraArgs (e.g. --ctx-size) to the actually spawned process', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'yahalla-llm-spawn-test-'))
+  const argvOutFile = join(dir, 'argv.json')
+  const scriptPath = join(dir, 'fake-llama-server')
+  writeFileSync(
+    scriptPath,
+    `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(argvOutFile)}, JSON.stringify(process.argv.slice(2)))\n`,
+    { mode: 0o755 },
+  )
+
+  const modelProcess = new LocalModelProcess(0)
+  try {
+    modelProcess.start(scriptPath, '/fake/model.gguf', ['--ctx-size', '4096'])
+
+    const deadline = Date.now() + 5000
+    let argv: string[] | null = null
+    while (Date.now() < deadline) {
+      try {
+        argv = JSON.parse(readFileSync(argvOutFile, 'utf8'))
+        break
+      } catch {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+    }
+
+    assert.ok(argv, 'expected the fake binary to have run and recorded its argv')
+    assert.deepEqual(argv, ['--model', '/fake/model.gguf', '--port', '0', '--host', '127.0.0.1', '--ctx-size', '4096'])
+  } finally {
+    modelProcess.stop()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('chatCompletionStream handles frames split across multiple TCP chunks', async () => {
