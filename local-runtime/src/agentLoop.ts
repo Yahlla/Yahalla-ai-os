@@ -636,10 +636,16 @@ async function runLoop(
 
   ctx.embodiment.transition('ERROR', 'Exceeded maximum tool rounds')
   ctx.db.prepare("UPDATE tasks SET status='failed', error=?, completed_at=datetime('now') WHERE id=?").run(
-    JSON.stringify({ message: `Exceeded max tool rounds (${maxRounds}) without a final answer.` }),
+    JSON.stringify({ message: `Exceeded max tool rounds (${maxRounds}) without a final answer.`, executed_tools: state.executedTools }),
     taskId,
   )
-  return { success: false, conversationId, taskId, status: 'failed', error: `Exceeded max tool rounds (${maxRounds}).` }
+  // Real audit finding: this failure path previously dropped
+  // state.executedTools entirely, so a caller (frontend, API consumer, a
+  // diagnostic tool) had zero visibility into what the agent actually
+  // attempted before giving up -- only "it failed," never "here's what it
+  // tried." Every other terminal path (completed, waiting_approval) already
+  // returns this; a runaway loop is exactly the case where it matters most.
+  return { success: false, conversationId, taskId, status: 'failed', error: `Exceeded max tool rounds (${maxRounds}).`, executedTools: state.executedTools }
 }
 
 function db(ctx: RuntimeContext): Db {
