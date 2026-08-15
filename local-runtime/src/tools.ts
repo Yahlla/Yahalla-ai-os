@@ -352,3 +352,65 @@ export function buildOpenAITools(): { type: 'function'; function: { name: string
     function: { name: t.key, description: t.description, parameters: t.parameters },
   }))
 }
+
+type JsonSchemaProperty = { type?: string }
+
+function jsonTypeMatches(value: unknown, expectedType: string): boolean {
+  switch (expectedType) {
+    case 'string':
+      return typeof value === 'string'
+    case 'boolean':
+      return typeof value === 'boolean'
+    case 'number':
+    case 'integer':
+      return typeof value === 'number'
+    case 'array':
+      return Array.isArray(value)
+    case 'object':
+      return typeof value === 'object' && value !== null && !Array.isArray(value)
+    default:
+      // A declared type this validator doesn't recognize is never grounds
+      // to block a call -- only an unambiguous mismatch against a type it
+      // does understand is.
+      return true
+  }
+}
+
+// Real audit finding: nothing validated a tool call's arguments against its
+// own declared JSON Schema (parameters.required/properties above) before
+// dispatching to the executor -- every executor did its own ad-hoc
+// `String(args.x ?? args.y ?? '')` coercion instead. That happens to fail
+// safely for some tools today (an empty path throws PathEscapeError) but
+// is incidental per-executor behavior, not a real validation layer, and
+// gives the model no clear "X is required" signal to correct from. This is
+// one generic check applied to every tool call before execution: a
+// declared required field that is missing/null/undefined, or a declared
+// property whose value doesn't match its declared JSON Schema type, is
+// rejected with a clear, actionable error instead of silently reaching the
+// executor with a wrong/missing value. Deliberately does not enforce
+// additionalProperties or enum values -- a harmless extra key, or a type
+// this validator doesn't recognize, should never hard-block a call it
+// can't be fully sure about; only an unambiguous required-missing or
+// required-type-mismatch case does.
+export function validateToolArguments(tool: ToolDef, args: Record<string, unknown>): string | null {
+  const schema = tool.parameters as { properties?: Record<string, JsonSchemaProperty>; required?: string[] }
+  const properties = schema.properties ?? {}
+  const required = schema.required ?? []
+
+  for (const field of required) {
+    if (args[field] === undefined || args[field] === null) {
+      return `Missing required argument "${field}" for "${tool.key}". Re-call the tool with "${field}" included.`
+    }
+  }
+
+  for (const [key, value] of Object.entries(args)) {
+    if (value === undefined) continue
+    const propertySchema = properties[key]
+    if (!propertySchema?.type) continue
+    if (!jsonTypeMatches(value, propertySchema.type)) {
+      return `Argument "${key}" for "${tool.key}" must be of type ${propertySchema.type}, got ${Array.isArray(value) ? 'array' : typeof value}. Re-call the tool with a valid value.`
+    }
+  }
+
+  return null
+}

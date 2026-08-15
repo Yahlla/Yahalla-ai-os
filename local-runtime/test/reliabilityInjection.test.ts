@@ -3,6 +3,7 @@ import { createServer as createFakeHttpServer } from 'node:http'
 import { after, before, test } from 'node:test'
 import { openDb, type Db } from '../src/db.js'
 import { LocalModelProcess } from '../src/llm.js'
+import { grantPermission } from '../src/permissions.js'
 import { createHttpServer } from '../src/server.js'
 import type { RuntimeConfig } from '../src/config.js'
 
@@ -77,6 +78,16 @@ let baseUrl: string
 
 before(async () => {
   db = openDb(':memory:')
+  // Real audit finding: without this, every git_status call below is a
+  // permission-DENIAL, identical every round -- which is exactly what the
+  // repeated-failure hard stop (agentLoop.ts's MAX_REPEATED_FAILURE_ATTEMPTS)
+  // now correctly intercepts after 3 attempts, well before max_tool_rounds
+  // is ever reached. Granting read access here makes git_status a real,
+  // harmless, repeatable SUCCESS instead, so this test isolates exactly
+  // what it says it tests -- the max_tool_rounds bound on a genuinely
+  // never-ending tool-calling loop -- independent of the separate
+  // repeated-failure behavior, which has its own dedicated test.
+  grantPermission(db, 'project', process.cwd(), 'read')
   fakeLlm = await startInfiniteToolCallLlm(18498)
   const modelProcess = new LocalModelProcess(18498)
   ;(modelProcess as any).child = { exitCode: null, killed: false }
@@ -114,9 +125,12 @@ test('a model that never stops calling tools is bounded by max_tool_rounds, not 
   assert.match(body.error, /Exceeded max tool rounds \(4\)/)
   // Real tools genuinely ran up to the bound (git_status against process.cwd()
   // -- this repository's own git tree, real read-only command) -- not a
-  // fast-path bail-out that skipped execution.
+  // fast-path bail-out that skipped execution. Each call succeeds for
+  // real (see the before() hook's permission grant) so this test is
+  // bounded purely by max_tool_rounds, not by the separate repeated-
+  // failure hard stop.
   assert.equal(body.executedTools.length, 4)
-  assert.ok(body.executedTools.every((t: any) => t.tool === 'git_status'))
+  assert.ok(body.executedTools.every((t: any) => t.tool === 'git_status' && t.result.success === true))
 })
 
 // Real audit finding (confirmed against the real qwen3-4b model on real

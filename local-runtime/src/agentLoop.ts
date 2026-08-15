@@ -24,7 +24,7 @@ import {
   summarizeSelfDevOutcome,
 } from './selfDev.js'
 import { getSubAgentProfile, type SubAgentProfile } from './subAgents.js'
-import { buildOpenAITools, DEFAULT_RUN_COMMAND_ALLOWLIST, getTool, type ToolDef } from './tools.js'
+import { buildOpenAITools, DEFAULT_RUN_COMMAND_ALLOWLIST, getTool, validateToolArguments, type ToolDef } from './tools.js'
 import { searchMemory, storeMemory } from './vectorMemory.js'
 
 export type ChatMessage = { role: string; content: string | null; tool_calls?: any; tool_call_id?: string; name?: string }
@@ -204,20 +204,33 @@ function summarizeToolResult(tool: ToolDef, result: Record<string, unknown>): st
   return `${summarizeToolCall(tool, {})} -- done`
 }
 
+// Real audit finding: annotateRepeatedFailure below only ever warned the
+// model in-band -- nothing stopped it from ignoring that warning and
+// retrying the exact same broken action anyway, all the way out to the
+// generic max_tool_rounds ceiling, with a final message that never said
+// *why* ("Exceeded max tool rounds" -- not "you repeated the same failing
+// action"). This is the hard, enforced cap on top of that: once the exact
+// same {tool, arguments, error} has failed this many times in one task, the
+// task stops immediately with a clear blocker instead of spending the
+// remaining round budget on a retry that has already proven pointless.
+const MAX_REPEATED_FAILURE_ATTEMPTS = 3
+
 // Cross-round repeated-failure detection: a failed result gets a stable
 // signature (structured, via diagnostics.ts's diagnoseCommandFailure for
 // run_project_command since it has stdout/stderr to fingerprint; generic
 // for every other tool). If this exact {tool, arguments, error} has
 // already failed before in this task, the model is told explicitly instead
-// of being left to silently repeat the same failing strategy until
-// max_tool_rounds runs out. A successful result is left untouched.
+// of being left to silently repeat the same failing strategy -- and once it
+// hits MAX_REPEATED_FAILURE_ATTEMPTS, blocked is set so the caller stops the
+// task outright rather than feeding it back for yet another attempt. A
+// successful result is left untouched.
 function annotateRepeatedFailure(
   state: LoopState,
   tool: ToolDef,
   args: Record<string, unknown>,
   result: Record<string, unknown>,
-): Record<string, unknown> {
-  if (result.success !== false) return result
+): { result: Record<string, unknown>; blocked: boolean } {
+  if (result.success !== false) return { result, blocked: false }
 
   const signature =
     tool.key === 'run_project_command'
@@ -226,14 +239,43 @@ function annotateRepeatedFailure(
       : signatureForToolFailure(tool.key, args, result.error ?? result)
 
   state.failureSignatures ??= {}
-  const priorCount = state.failureSignatures[signature] ?? 0
-  state.failureSignatures[signature] = priorCount + 1
+  const occurrences = (state.failureSignatures[signature] ?? 0) + 1
+  state.failureSignatures[signature] = occurrences
 
-  if (priorCount === 0) return result
+  if (occurrences === 1) return { result, blocked: false }
+
+  const blocked = occurrences >= MAX_REPEATED_FAILURE_ATTEMPTS
   return {
-    ...result,
-    repeated_failure_warning: `This exact call has already failed the same way ${priorCount} time(s) before in this task. Repeating it unchanged will not help -- try a different approach, inspect more context first, or explain to the user why it cannot proceed.`,
+    result: {
+      ...result,
+      repeated_failure_warning: blocked
+        ? `This exact call has now failed the same way ${occurrences} time(s) in this task -- the maximum before Yahalla stops retrying it automatically. Stopping here instead of continuing to retry.`
+        : `This exact call has already failed the same way ${occurrences - 1} time(s) before in this task. Repeating it unchanged will not help -- try a different approach, inspect more context first, or explain to the user why it cannot proceed.`,
+    },
+    blocked,
   }
+}
+
+// Same terminal shape every other failure path in runLoop already returns
+// (task row updated to 'failed', ChatResult carries the real executedTools
+// so far) -- just triggered by "this has already failed the same way
+// MAX_REPEATED_FAILURE_ATTEMPTS times" instead of an LLM/HTTP-level signal.
+function repeatedFailureBlockedResult(
+  ctx: RuntimeContext,
+  taskId: string,
+  conversationId: string,
+  state: LoopState,
+  tool: ToolDef,
+  result: Record<string, unknown>,
+): ChatResult {
+  const errorText = typeof result.error === 'string' ? result.error : JSON.stringify(result.error ?? result).slice(0, 300)
+  const message = `Blocked: "${tool.key}" failed the same way ${MAX_REPEATED_FAILURE_ATTEMPTS} times in a row -- stopping instead of retrying again. Last error: ${errorText}`
+  ctx.embodiment.transition('ERROR', message)
+  ctx.db.prepare("UPDATE tasks SET status='failed', error=?, completed_at=datetime('now') WHERE id=?").run(
+    JSON.stringify({ message, executed_tools: state.executedTools }),
+    taskId,
+  )
+  return { success: false, conversationId, taskId, status: 'failed', error: message, executedTools: state.executedTools }
 }
 
 function toolPermissionTarget(tool: ToolDef, projectRoot: string): string {
@@ -388,6 +430,16 @@ Never guess or invent a fact -- every claim must come from an actual tool result
           tool_call_id: call.id,
           name: tool.key,
           content: JSON.stringify({ success: false, error: `Arguments for "${tool.key}" were not valid JSON.` }),
+        })
+        continue
+      }
+      const subAgentValidationError = validateToolArguments(tool, args)
+      if (subAgentValidationError) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: tool.key,
+          content: JSON.stringify({ success: false, error: subAgentValidationError }),
         })
         continue
       }
@@ -630,6 +682,17 @@ async function runLoop(
         continue
       }
 
+      const validationError = validateToolArguments(tool, args)
+      if (validationError) {
+        state.messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          name: tool.key,
+          content: JSON.stringify({ success: false, error: validationError }),
+        })
+        continue
+      }
+
       const dedupKey = `${tool.key}::${JSON.stringify(sortKeys(args))}`
       const cached = seenThisRound.get(dedupKey)
       if (cached) {
@@ -671,8 +734,12 @@ async function runLoop(
       // always sees the real, untruncated result -- only what actually goes
       // to the model is bounded, so failure fingerprinting and the HTTP
       // response's executedTools[].result stay exact.
-      const reportedResult = annotateRepeatedFailure(state, tool, args, toolResult)
+      const { result: reportedResult, blocked } = annotateRepeatedFailure(state, tool, args, toolResult)
       state.messages.push({ role: 'tool', tool_call_id: call.id, name: tool.key, content: JSON.stringify(truncateToolResultForContext(reportedResult)) })
+
+      if (blocked) {
+        return repeatedFailureBlockedResult(ctx, taskId, conversationId, state, tool, toolResult)
+      }
     }
   }
 
@@ -866,14 +933,18 @@ export async function resumeApproval(
   ctx.db.prepare('UPDATE approvals SET result = ? WHERE id = ?').run(JSON.stringify(toolResult), approvalId)
 
   context.executedTools.push({ tool: tool.key, arguments: args, result: toolResult })
-  const reportedResult =
-    decision === 'approve' ? annotateRepeatedFailure(context, tool, args, toolResult) : toolResult
+  const { result: reportedResult, blocked } =
+    decision === 'approve' ? annotateRepeatedFailure(context, tool, args, toolResult) : { result: toolResult, blocked: false }
   context.messages.push({
     role: 'tool',
     tool_call_id: context.pendingToolCallId,
     name: tool.key,
     content: JSON.stringify(reportedResult),
   })
+
+  if (blocked) {
+    return repeatedFailureBlockedResult(ctx, approval.task_id, context.conversationId, context, tool, toolResult)
+  }
 
   ctx.db.prepare("UPDATE tasks SET status='running' WHERE id=?").run(approval.task_id)
 

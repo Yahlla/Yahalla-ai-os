@@ -26,6 +26,9 @@ function triggerFor(body: any): string | null {
   if (content.includes('dedup-test')) return 'dedup-test'
   if (content.includes('malformed-test')) return 'malformed-test'
   if (content.includes('repeat-fail-test')) return 'repeat-fail-test'
+  if (content.includes('hardstop-test')) return 'hardstop-test'
+  if (content.includes('missing-arg-test')) return 'missing-arg-test'
+  if (content.includes('wrong-type-test')) return 'wrong-type-test'
   return null
 }
 
@@ -130,6 +133,56 @@ function startFakeLlm(port: number) {
       return
     }
 
+    if (trigger === 'hardstop-test') {
+      // Always emits the exact same failing tool call, never a final
+      // answer -- proves the RUNTIME stops the task after
+      // MAX_REPEATED_FAILURE_ATTEMPTS, not that the model chose to give up.
+      res.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  { id: `call_hardstop_${toolMessages.length}`, type: 'function', function: { name: 'run_project_command', arguments: JSON.stringify({ command: 'rm -rf /' }) } },
+                ],
+              },
+            },
+          ],
+        }),
+      )
+      return
+    }
+
+    if (trigger === 'missing-arg-test') {
+      if (toolMessages.length === 0) {
+        // Deliberately omits the required "path" argument.
+        res.end(
+          JSON.stringify({
+            choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'call_missing_path', type: 'function', function: { name: 'read_project_file', arguments: '{}' } }] } }],
+          }),
+        )
+        return
+      }
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'done-missing-arg' } }] }))
+      return
+    }
+
+    if (trigger === 'wrong-type-test') {
+      if (toolMessages.length === 0) {
+        // "path" is declared as a string but the model supplies a number.
+        res.end(
+          JSON.stringify({
+            choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'call_wrong_type', type: 'function', function: { name: 'list_project_files', arguments: JSON.stringify({ path: 123 }) } }] } }],
+          }),
+        )
+        return
+      }
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'done-wrong-type' } }] }))
+      return
+    }
+
     res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'no-op' } }] }))
   })
   return new Promise<import('node:http').Server>((resolve) => server.listen(port, '127.0.0.1', () => resolve(server)))
@@ -228,6 +281,36 @@ test('a repeated identical tool failure is flagged to the model on its second oc
   const allParsed = captured.map((c) => JSON.parse(c))
   const withWarning = allParsed.filter((p) => typeof p.repeated_failure_warning === 'string')
   assert.ok(withWarning.length >= 1, 'expected at least one tool message to carry a repeated_failure_warning')
+})
+
+test('REGRESSION: an exact failure repeated a 3rd time hard-stops the task instead of retrying forever', async () => {
+  const { body } = await api('/chat', { method: 'POST', body: JSON.stringify({ message: 'hardstop-test run a bad command' }) })
+
+  assert.equal(body.status, 'failed')
+  assert.match(body.error, /Blocked: "run_project_command" failed the same way 3 times in a row/)
+  // Exactly 3 executions -- the runtime stopped itself before ever asking
+  // the model (or executing the tool) a 4th time, even though the fake LLM
+  // would have happily kept emitting the identical call forever.
+  assert.equal(body.executedTools.length, 3)
+  assert.ok(body.executedTools.every((t: any) => t.tool === 'run_project_command' && t.result.success === false))
+})
+
+test('REGRESSION: a missing required tool argument is rejected before execution with a clear error', async () => {
+  const { body } = await api('/chat', { method: 'POST', body: JSON.stringify({ message: 'missing-arg-test please read a file' }) })
+
+  assert.equal(body.status, 'completed')
+  assert.equal(body.answer, 'done-missing-arg')
+  // The tool was never actually reached (no permission/filesystem attempt) --
+  // validation short-circuited before executeToolNow.
+  assert.equal(body.executedTools.length, 0)
+})
+
+test('REGRESSION: a tool argument of the wrong declared type is rejected before execution with a clear error', async () => {
+  const { body } = await api('/chat', { method: 'POST', body: JSON.stringify({ message: 'wrong-type-test please list files' }) })
+
+  assert.equal(body.status, 'completed')
+  assert.equal(body.answer, 'done-wrong-type')
+  assert.equal(body.executedTools.length, 0)
 })
 
 // --- llm.ts-level retry behavior: real HTTP against a fake server that

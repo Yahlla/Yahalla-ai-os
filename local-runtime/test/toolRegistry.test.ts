@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { executeDeviceTool } from '@yahalla/agent-tools'
-import { TOOLS, buildOpenAITools, getTool } from '../src/tools.js'
+import { TOOLS, buildOpenAITools, getTool, validateToolArguments } from '../src/tools.js'
 import { isToolAllowedForRole } from '../src/roles.js'
 
 // Full tool-registry audit (audit Phase 5/7): for every real tool in the
@@ -129,4 +129,64 @@ test('every write/execute-permission tool is blocked for the normal role, by con
 test('requiresApproval is set on exactly the tools expected to need it', () => {
   const approvalGated = TOOLS.filter((t) => t.requiresApproval).map((t) => t.key).sort()
   assert.deepEqual(approvalGated, ['db_execute', 'github.write'])
+})
+
+// Argument validation (audit finding: nothing checked a tool call's
+// arguments against its own declared schema before dispatch, only
+// incidental per-executor coercion). Exhaustive over the real TOOLS
+// registry -- not a hand-picked sample -- so a future tool with a required
+// field is covered automatically.
+function sampleValueForType(type: string | undefined): unknown {
+  switch (type) {
+    case 'string':
+      return 'x'
+    case 'boolean':
+      return true
+    case 'number':
+    case 'integer':
+      return 1
+    case 'array':
+      return []
+    case 'object':
+      return {}
+    default:
+      return 'x'
+  }
+}
+
+test('validateToolArguments rejects a call missing any declared required argument, for every real tool', () => {
+  for (const tool of TOOLS) {
+    const required = (tool.parameters.required as string[] | undefined) ?? []
+    if (required.length === 0) continue
+    const error = validateToolArguments(tool, {})
+    assert.ok(error, `${tool.key}: expected a validation error for a call missing all required arguments`)
+    assert.match(error!, new RegExp(`Missing required argument "${required[0]}"`), `${tool.key}: error should name the missing field`)
+  }
+})
+
+test('validateToolArguments accepts a fully valid, correctly-typed call for every real tool', () => {
+  for (const tool of TOOLS) {
+    const properties = (tool.parameters.properties as Record<string, { type?: string }>) ?? {}
+    const required = (tool.parameters.required as string[] | undefined) ?? []
+    const args: Record<string, unknown> = {}
+    for (const field of required) args[field] = sampleValueForType(properties[field]?.type)
+    const error = validateToolArguments(tool, args)
+    assert.equal(error, null, `${tool.key}: expected a minimally-valid call to pass validation, got: ${error}`)
+  }
+})
+
+test('validateToolArguments rejects a declared property whose value does not match its declared type', () => {
+  const readFileTool = getTool('read_project_file')!
+  assert.match(validateToolArguments(readFileTool, { path: 123 })!, /must be of type string/)
+
+  const listFilesTool = getTool('list_project_files')!
+  assert.match(validateToolArguments(listFilesTool, { path: true })!, /must be of type string/)
+
+  const browserTypeTool = getTool('browser_type')!
+  assert.match(validateToolArguments(browserTypeTool, { selector: 'input', text: 'hi', submit: 'yes' })!, /must be of type boolean/)
+})
+
+test('validateToolArguments does not block a harmless extra property the schema does not declare', () => {
+  const readFileTool = getTool('read_project_file')!
+  assert.equal(validateToolArguments(readFileTool, { path: 'a.txt', extra_field_the_model_made_up: 'x' }), null)
 })
