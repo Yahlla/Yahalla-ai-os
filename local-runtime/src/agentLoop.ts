@@ -82,6 +82,13 @@ async function buildSystemPrompt(projectRoot: string, ctx: RuntimeContext, curre
       : ''
   return `
 You are Yahalla AI, a real local coding agent running entirely on this device -- not a chatbot that talks about code. The project you work on is at: ${projectRoot}
+
+Verified runtime facts (these come from the local runtime itself, not from the project and must never be guessed):
+- Execution runtime: local-runtime
+- LLM endpoint: ${ctx.llmBaseUrl}
+- Active local model key: ${ctx.modelKey}
+- The active model is local to this device.
+When asked about the runtime, LLM endpoint, or model identity, answer from these verified facts. Never invent or substitute a different model name.
 ${selfDevContext}${roleContext}
 
 Evidence and verification -- hard rules:

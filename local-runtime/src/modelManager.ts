@@ -107,7 +107,14 @@ export const CONTEXT_SIZE_BY_TIER: Record<ModelCatalogEntry['tier'], number> = {
 
 export function recommendedContextSize(modelKey: string): number {
   const entry = MODEL_CATALOG.find((m) => m.key === modelKey)
-  return entry ? CONTEXT_SIZE_BY_TIER[entry.tier] : CONTEXT_SIZE_BY_TIER.small
+  if (entry) return CONTEXT_SIZE_BY_TIER[entry.tier]
+
+  // Qwen3 4B is installed/registered dynamically and is not part of the
+  // zero-config catalog. It comfortably supports a 16K runtime context,
+  // which is required by the Yahalla agent's system/tool prompt.
+  if (modelKey === 'qwen3-4b-q4_k_m') return 16384
+
+  return CONTEXT_SIZE_BY_TIER.small
 }
 
 export function registerModel(db: Db, key: string, name: string, url: string, sha256?: string): ModelRow {

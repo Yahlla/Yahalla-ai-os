@@ -64,7 +64,10 @@ function readStoredPairing(): StoredPairing | null {
 let cachedInfo: { baseUrl: string; authToken: string } | null | undefined
 
 export async function getRuntimeInfo(): Promise<{ baseUrl: string; authToken: string } | null> {
-  if (cachedInfo !== undefined) return cachedInfo
+  // Never permanently cache a missing runtime connection.
+  // A plain browser tab may start before the local runtime is ready,
+  // or may pair later during the same session.
+  if (cachedInfo) return cachedInfo
 
   if (window.yahallaDesktop) {
     cachedInfo = await window.yahallaDesktop.getRuntimeInfo()
@@ -79,8 +82,16 @@ export async function getRuntimeInfo(): Promise<{ baseUrl: string; authToken: st
 
   const devToken = import.meta.env.VITE_YAHALLA_RUNTIME_TOKEN as string | undefined
   const devUrl = (import.meta.env.VITE_YAHALLA_RUNTIME_URL as string | undefined) ?? DEFAULT_LOCAL_RUNTIME_URL
-  cachedInfo = devToken ? { baseUrl: devUrl, authToken: devToken } : null
-  return cachedInfo
+
+  if (devToken) {
+    cachedInfo = { baseUrl: devUrl, authToken: devToken }
+    return cachedInfo
+  }
+
+  // Important: do NOT cache null.
+  // The runtime may become available later and the browser must be
+  // able to discover and pair with it without a reload.
+  return null
 }
 
 // One-click pairing for a plain browser tab (no Electron bridge): fetches
@@ -166,13 +177,44 @@ export type RuntimeHealth = {
 }
 
 export async function checkRuntimeHealth(): Promise<RuntimeHealth | null> {
+  const info = await getRuntimeInfo()
+  const configuredUrl =
+    (import.meta.env.VITE_YAHALLA_RUNTIME_URL as string | undefined) ??
+    DEFAULT_LOCAL_RUNTIME_URL
+
+  // Health is intentionally unauthenticated and must work even before
+  // browser pairing. Always probe the known local endpoint directly when
+  // this tab has not paired yet.
+  const base = info?.baseUrl ?? configuredUrl
+
   try {
-    const info = await getRuntimeInfo()
-    const base = info?.baseUrl ?? ((import.meta.env.VITE_YAHALLA_RUNTIME_URL as string | undefined) ?? DEFAULT_LOCAL_RUNTIME_URL)
-    const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) })
+    const response = await fetch(`${base}/health`, {
+      signal: AbortSignal.timeout(3000),
+      cache: 'no-store',
+    })
+
     if (!response.ok) return null
+
     return (await response.json()) as RuntimeHealth
-  } catch {
+  } catch (error) {
+    // If a configured URL failed, retry the canonical localhost runtime.
+    // This protects the browser from stale Vite/env configuration.
+    if (base !== DEFAULT_LOCAL_RUNTIME_URL) {
+      try {
+        const response = await fetch(`${DEFAULT_LOCAL_RUNTIME_URL}/health`, {
+          signal: AbortSignal.timeout(3000),
+          cache: 'no-store',
+        })
+
+        if (response.ok) {
+          return (await response.json()) as RuntimeHealth
+        }
+      } catch {
+        // Fall through to null.
+      }
+    }
+
+    console.error('[LOCAL RUNTIME HEALTH ERROR]', error)
     return null
   }
 }

@@ -10,3 +10,7 @@ public/tesseract/
 .env.*.local
 .vercel
 .env*
+
+# Runtime logs
+logs/
+*.log

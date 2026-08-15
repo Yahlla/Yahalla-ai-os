@@ -91,7 +91,14 @@ export async function chatCompletionStream(
     const response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...payload, stream: true }),
+      body: JSON.stringify({
+      ...payload,
+      stream: true,
+      chat_template_kwargs: {
+        ...(typeof payload.chat_template_kwargs === 'object' && payload.chat_template_kwargs !== null ? payload.chat_template_kwargs : {}),
+        enable_thinking: false,
+      },
+    }),
       signal: controller.signal,
     })
     if (!response.ok || !response.body) {

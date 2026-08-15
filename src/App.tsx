@@ -2579,35 +2579,35 @@ function ChatSection() {
     let cancelled = false
     async function detectTier() {
       const health = await localRuntime.checkRuntimeHealth()
-      const paired = health?.llm_reachable ? await localRuntime.isPairedWithLocalRuntime() : false
 
-      if (health?.llm_reachable && paired) {
-        if (!cancelled) setRuntimeTier('local')
-        return
+      // Automatically pair with a healthy local Agent Runtime when this
+      // browser tab has no stored pairing yet.
+      if (health?.llm_reachable === true) {
+        const paired = await localRuntime.isPairedWithLocalRuntime()
+
+        if (!paired) {
+          const pairing = await localRuntime.pairWithLocalRuntime()
+          if (pairing.ok) {
+            if (!cancelled) setRuntimeTier('local')
+            return
+          }
+        } else {
+          if (!cancelled) setRuntimeTier('local')
+          return
+        }
       }
 
       const browserAvailable = await browserRuntime.checkBrowserRuntimeAvailable()
-      // Zero-friction: start the one-time download now, in the
-      // background, rather than waiting for the user to hit send. Errors
-      // here are silently swallowed -- sendMessage's own call to the same
-      // function will surface them normally if the background attempt
-      // didn't already succeed.
-      if (browserAvailable) ensureBrowserModelLoading(false).catch(() => {})
 
-      if (health?.llm_reachable && !paired) {
-        // A real local-runtime is running on this device but this browser
-        // tab hasn't connected to it yet (see localRuntime.ts's pairing
-        // flow) -- still worth telling the user, distinctly from "nothing
-        // local at all", since one click on "Connect" gets them full
-        // tool-using local-runtime instead of the tool-less browser tier.
-        if (!cancelled) setRuntimeTier('local-unpaired')
-        return
-      }
+      // Zero-friction: start the one-time browser model download in the
+      // background only when no local Agent Runtime is available.
+      if (browserAvailable) ensureBrowserModelLoading(false).catch(() => {})
 
       if (browserAvailable) {
         if (!cancelled) setRuntimeTier('browser')
         return
       }
+
       if (!cancelled) setRuntimeTier('cloud')
     }
     detectTier()
@@ -3220,7 +3220,9 @@ function ChatSection() {
       // as the true last resort further down when neither local-runtime
       // nor the on-device browser tier (WebGPU/WASM, still zero external
       // AI inference) is available at all.
-      const localPaired = runtimeHealth?.llm_reachable ? await localRuntime.isPairedWithLocalRuntime() : false
+      const localPaired =
+        runtimeHealth?.llm_reachable === true &&
+        (await localRuntime.isPairedWithLocalRuntime())
 
       if (codingAgentEnabled && platformApi.isPlatformApiConfigured()) {
         setRuntimeTier('cloud')
