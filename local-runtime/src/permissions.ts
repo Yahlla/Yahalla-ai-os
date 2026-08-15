@@ -42,7 +42,7 @@ const ACCESS_RANK: Record<AccessLevel, number> = { none: 0, read: 1, write: 2, e
 // grant is stored AND at comparison time in bestMatch, so this closes
 // the gap for permission rows that were already written before this fix
 // existed, not only new ones.
-function normalizeProjectTarget(target: string): string {
+export function normalizeProjectTarget(target: string): string {
   if (target === '*') return target
   const resolved = resolve(target)
   const stripped = resolved.length > 1 && resolved.endsWith(sep) ? resolved.slice(0, -1) : resolved

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer as createFakeHttpServer } from 'node:http'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, test } from 'node:test'
@@ -62,6 +62,13 @@ function startFakeLlm(port: number) {
 }
 
 let projectDir: string
+// The server canonicalizes ctx.projectRoot (realpath, e.g. macOS's
+// /var -> /private/var symlink) so /project/trust returns the same
+// representation for both projectRoot and permission.target. Comparisons
+// against server-reported paths use this canonical form; projectDir
+// itself (the raw mkdtempSync path) is still what's passed into
+// RuntimeConfig and used for filesystem operations like rmSync.
+let canonicalProjectDir: string
 let db: Db
 let fakeLlm: import('node:http').Server
 let httpServer: import('node:http').Server
@@ -70,6 +77,7 @@ const authToken = 'test-token'
 
 before(async () => {
   projectDir = mkdtempSync(join(tmpdir(), 'yahalla-project-trust-test-'))
+  canonicalProjectDir = realpathSync(projectDir)
   writeFileSync(join(projectDir, 'package.json'), JSON.stringify({ name: 'fixture', version: '0.0.0' }))
 
   db = openDb(':memory:')
@@ -104,7 +112,7 @@ async function api(path: string, init: RequestInit = {}): Promise<{ status: numb
 
 test('REGRESSION: a fresh install with no permission ever granted really does deny get_project_overview through the real /chat path', async () => {
   const { body: status } = await api('/project/status')
-  assert.equal(status.projectRoot, projectDir)
+  assert.equal(status.projectRoot, canonicalProjectDir)
   assert.equal(status.trusted, false, 'a fresh install must not be trusted until /project/trust is called')
 
   const { body } = await api('/chat', { method: 'POST', body: JSON.stringify({ message: 'give me a project overview' }) })
@@ -117,8 +125,8 @@ test('REGRESSION: a fresh install with no permission ever granted really does de
 test('POST /project/trust grants access to the server-resolved project root, never a client-supplied path', async () => {
   const trust = await api('/project/trust', { method: 'POST', body: JSON.stringify({ access: 'write', target: '/some/other/attacker-controlled/path' }) })
   assert.equal(trust.status, 200)
-  assert.equal(trust.body.projectRoot, projectDir, 'the granted target must be the real projectRoot, ignoring any client-supplied target')
-  assert.equal(trust.body.permission.target, projectDir)
+  assert.equal(trust.body.projectRoot, canonicalProjectDir, 'the granted target must be the real projectRoot, ignoring any client-supplied target')
+  assert.equal(trust.body.permission.target, canonicalProjectDir)
   assert.equal(trust.body.permission.access, 'write')
 
   const status = await api('/project/status')
@@ -130,5 +138,5 @@ test('after trust, get_project_overview succeeds through the real /chat HTTP pat
   assert.equal(body.status, 'completed')
   assert.equal(body.executedTools[0].tool, 'get_project_overview')
   assert.equal(body.executedTools[0].result.success, true)
-  assert.equal(body.executedTools[0].result.overview.projectRoot, projectDir)
+  assert.equal(body.executedTools[0].result.overview.projectRoot, canonicalProjectDir)
 })

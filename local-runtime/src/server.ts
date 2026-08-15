@@ -31,7 +31,7 @@ import {
   registerModel,
   setActiveModel,
 } from './modelManager.js'
-import { checkAccess, grantPermission, listPermissions, revokePermission, type AccessLevel, type PermissionScope } from './permissions.js'
+import { checkAccess, grantPermission, listPermissions, normalizeProjectTarget, revokePermission, type AccessLevel, type PermissionScope } from './permissions.js'
 import { canChangeRole, getDeviceRole, setDeviceRole, type DeviceRole } from './roles.js'
 
 export type ServerDeps = {
@@ -83,7 +83,12 @@ export function ctxFrom(deps: ServerDeps, embodiment: EmbodimentStateMachine, pe
   const active = getActiveModel(deps.db)
   return {
     db: deps.db,
-    projectRoot: deps.config.projectRoot ?? process.cwd(),
+    // Canonicalized with the exact same realpath logic permissions.ts uses
+    // to store/compare project-scope grants, so ctx.projectRoot and any
+    // permission.target for it always agree on one string representation
+    // (e.g. macOS's /var -> /private/var symlink) instead of silently
+    // diverging depending on which of the two ever touched realpathSync.
+    projectRoot: normalizeProjectTarget(deps.config.projectRoot ?? process.cwd()),
     llmBaseUrl: deps.modelProcess.baseUrl,
     modelKey: active?.key ?? 'local-model',
     embodiment,

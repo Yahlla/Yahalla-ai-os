@@ -149,9 +149,9 @@ test('POST /chat/cancel actually stops an in-flight /chat/stream request instead
     // never called. Without real cancellation, this request would only
     // ever end via the 120s timeout.
   })
-  await new Promise<void>((resolve) => hangingLlm.listen(18101, '127.0.0.1', () => resolve()))
+  await new Promise<void>((resolve) => hangingLlm.listen(18104, '127.0.0.1', () => resolve()))
 
-  const hangingModelProcess = new LocalModelProcess(18101)
+  const hangingModelProcess = new LocalModelProcess(18104)
   ;(hangingModelProcess as any).child = { exitCode: null, killed: false }
   const config: RuntimeConfig = { port: 0, authToken, projectRoot: projectDir, allowedOrigins: [] }
   const cancelServer = createHttpServer({ db: openDb(':memory:'), config, modelProcess: hangingModelProcess })
