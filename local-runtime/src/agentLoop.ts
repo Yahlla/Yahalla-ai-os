@@ -509,9 +509,37 @@ async function runLoop(
     // round is either a plain-text answer or a tool call, never a mix, so
     // forwarding content deltas live as they arrive never ends up
     // "retracting" text the user already saw.
-    const result = onToken
-      ? await chatCompletionStreamWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools }, onToken, { signal })
-      : await chatCompletionWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools }, { signal })
+    const callLlmForRound = () =>
+      onToken
+        ? chatCompletionStreamWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools }, onToken, { signal })
+        : chatCompletionWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools }, { signal })
+
+    let result = await callLlmForRound()
+
+    // Real audit finding, confirmed against the real qwen3-4b model on real
+    // hardware: llama-server can return a genuinely successful HTTP
+    // response (valid JSON, result.ok === true) whose message has BOTH
+    // empty content and no tool_calls -- the local model's own generation
+    // variance under a tool-calling grammar, not an HTTP/JSON/permission/
+    // tool failure (those already return earlier via result.ok === false
+    // below, or happen in the entirely separate tool-execution code path
+    // once tool_calls actually exist -- this check never sees either).
+    // Treated as transient exactly once: one immediate retry of the
+    // identical request -- same state.messages (same conversation/tool
+    // context), same tools, same signal -- never more than one, and never
+    // for any other failure class. A cancellation requested in between is
+    // respected rather than spending a second real inference on a task the
+    // user already stopped.
+    if (result.ok) {
+      const firstMessage = result.data?.choices?.[0]?.message
+      const firstToolCalls = Array.isArray(firstMessage?.tool_calls) ? firstMessage.tool_calls : []
+      const firstAnswer = firstToolCalls.length === 0
+        ? (firstMessage?.content ?? result.data?.choices?.[0]?.text ?? (typeof result.data === 'string' ? result.data : ''))
+        : ''
+      if (firstToolCalls.length === 0 && !firstAnswer && !(signal?.aborted ?? false)) {
+        result = await callLlmForRound()
+      }
+    }
 
     if (!result.ok) {
       const wasCancelled = signal?.aborted ?? false
