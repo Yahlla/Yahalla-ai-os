@@ -197,7 +197,17 @@ export async function sendChatMessage(params: { message: string; conversation_id
     method: 'POST',
     body: JSON.stringify({ message: params.message, conversation_id: params.conversation_id }),
   })
-  const result = (await response.json()) as LocalChatResult
+  // Same real fix as api.ts's sendChatMessage: check response.ok and
+  // handle a non-JSON body before parsing, rather than letting a
+  // malformed/unexpected response surface as an opaque JSON.parse
+  // SyntaxError instead of a clear message.
+  const text = await response.text()
+  let result: LocalChatResult
+  try {
+    result = text ? (JSON.parse(text) as LocalChatResult) : ({} as LocalChatResult)
+  } catch {
+    throw new Error(`Local Agent Runtime returned a non-JSON response (HTTP ${response.status}): ${text.slice(0, 200)}`)
+  }
   if (!response.ok) {
     throw new Error(result.error || `Local Agent Runtime returned HTTP ${response.status}`)
   }

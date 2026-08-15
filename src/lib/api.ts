@@ -169,7 +169,26 @@ export async function sendChatMessage(params: {
     body: JSON.stringify(params),
   })
 
-  const result = await response.json()
+  // Real audit finding: response.json() used to run unconditionally here,
+  // before checking response.ok and with no fallback for a non-JSON body.
+  // This is the last fallback tier in App.tsx's chat chain -- reached
+  // whenever local-runtime/browser/cloud-boost are all unavailable -- so
+  // a misconfigured or undeployed edge function returning an HTML error
+  // page here (a hosting platform's own 404 page, a proxy error page,
+  // anything not actually JSON) surfaced as an opaque
+  // "Unexpected token '<char>', "<page text>"... is not valid JSON"
+  // instead of a clear, actionable message.
+  const text = await response.text()
+  let result: any
+  try {
+    result = text ? JSON.parse(text) : {}
+  } catch {
+    throw new Error(
+      response.ok
+        ? `Yahalla AI returned a non-JSON response (HTTP ${response.status}): ${text.slice(0, 200)}`
+        : `Yahalla AI returned HTTP ${response.status}: ${text.slice(0, 200)}`,
+    )
+  }
 
   if (!response.ok) {
     throw new Error(result?.error || `Yahalla AI returned HTTP ${response.status}`)

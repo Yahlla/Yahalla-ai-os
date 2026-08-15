@@ -53,13 +53,13 @@ test('getTool resolves every real key and returns undefined for an unknown one',
 // resolves to a real executor, not the registry's generic "No local
 // executor registered for tool" fallback, which would silently mean a
 // tool the model is told about can never actually run.
-test('every files/system tool key has a real, reachable executor in @yahalla/agent-tools (not a dead registration)', () => {
+test('every files/system tool key has a real, reachable executor in @yahalla/agent-tools (not a dead registration)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'yahalla-tool-registry-test-'))
   try {
     const deviceDispatchedTools = TOOLS.filter((t) => (t.category === 'files' || t.category === 'system') && t.key !== 'get_project_overview')
     assert.ok(deviceDispatchedTools.length > 0, 'sanity: there should be several files/system tools to check')
     for (const tool of deviceDispatchedTools) {
-      const result = executeDeviceTool(tool.key, dir, {}, { allowlist: ['npm test'] })
+      const result = await executeDeviceTool(tool.key, dir, {}, { allowlist: ['npm test'] })
       assert.notEqual(
         result.error,
         `No local executor registered for tool "${tool.key}".`,

@@ -97,10 +97,10 @@ test('resolveProjectPath: a symlink that stays inside the project root is allowe
 // actually takes (executeDeviceTool, the same function agentLoop.ts's
 // executeToolNow dispatches every files/system tool through), not just the
 // internal helper in isolation.
-test('executeDeviceTool: a path-traversal read_project_file call is rejected cleanly, not thrown as an unhandled error', () => {
+test('executeDeviceTool: a path-traversal read_project_file call is rejected cleanly, not thrown as an unhandled error', async () => {
   const root = mkdtempSync(join(tmpdir(), 'yahalla-sandbox-test-'))
   try {
-    const result = executeDeviceTool('read_project_file', root, { path: '../../../etc/passwd' })
+    const result = await executeDeviceTool('read_project_file', root, { path: '../../../etc/passwd' })
     assert.equal(result.success, false)
     assert.match(String(result.error), /outside the project root/)
   } finally {
@@ -108,12 +108,12 @@ test('executeDeviceTool: a path-traversal read_project_file call is rejected cle
   }
 })
 
-test('executeDeviceTool: a path-traversal write_project_file call is rejected and never touches disk outside the root', () => {
+test('executeDeviceTool: a path-traversal write_project_file call is rejected and never touches disk outside the root', async () => {
   const root = mkdtempSync(join(tmpdir(), 'yahalla-sandbox-test-'))
   const outside = mkdtempSync(join(tmpdir(), 'yahalla-sandbox-outside-write-'))
   try {
     const attackPath = join('..', ...outside.split('/').filter(Boolean).slice(-1), 'pwned.txt')
-    const result = executeDeviceTool('write_project_file', root, { path: attackPath, content: 'pwned' })
+    const result = await executeDeviceTool('write_project_file', root, { path: attackPath, content: 'pwned' })
     assert.equal(result.success, false)
     assert.match(String(result.error), /outside the project root/)
     assert.equal(existsSync(join(outside, 'pwned.txt')), false)

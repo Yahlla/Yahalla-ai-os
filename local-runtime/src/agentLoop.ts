@@ -33,7 +33,7 @@ export type ChatResult = {
   success: boolean
   conversationId: string
   taskId?: string
-  status: 'completed' | 'waiting_approval' | 'failed'
+  status: 'completed' | 'waiting_approval' | 'failed' | 'cancelled'
   answer?: string
   error?: string
   executedTools?: { tool: string; arguments: Record<string, unknown>; result: Record<string, unknown> }[]
@@ -244,6 +244,7 @@ async function executeToolNow(
   ctx: RuntimeContext,
   tool: ToolDef,
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   // Real, code-enforced role gate -- checked fresh from the database on
   // every single call, before the existing standing-permission check
@@ -306,7 +307,7 @@ async function executeToolNow(
   }
 
   const config = tool.key === 'run_project_command' ? { allowlist: DEFAULT_RUN_COMMAND_ALLOWLIST } : {}
-  return executeDeviceTool(tool.key, ctx.projectRoot, args, config)
+  return executeDeviceTool(tool.key, ctx.projectRoot, args, config, signal)
 }
 
 type SubAgentLoopResult = {
@@ -469,6 +470,7 @@ async function runLoop(
   conversationId: string,
   state: LoopState,
   onToken?: (delta: string) => void,
+  signal?: AbortSignal,
 ): Promise<ChatResult> {
   const maxRounds = getPreference<number>(ctx.db, 'max_tool_rounds') ?? 15
   const llmTools = buildOpenAITools()
@@ -484,6 +486,16 @@ async function runLoop(
   const budgetChars = conversationBudgetChars(recommendedContextSize(ctx.modelKey))
 
   for (let round = 0; round < maxRounds; round++) {
+    // Real cancellation checkpoint, not just a hope that the LLM fetch's
+    // own abort fires in time: checked at the start of every round, so a
+    // cancel requested while a tool was executing (or right as a round
+    // finished) stops the loop here even if nothing else caught it.
+    if (signal?.aborted) {
+      ctx.embodiment.transition('ERROR', 'Task cancelled')
+      ctx.db.prepare("UPDATE tasks SET status='cancelled', completed_at=datetime('now') WHERE id=?").run(taskId)
+      return { success: false, conversationId, taskId, status: 'cancelled', error: 'Task was cancelled.', executedTools: state.executedTools }
+    }
+
     state.messages = compactMessagesForBudget(state.messages, budgetChars)
     ctx.embodiment.transition('THINKING', round === 0 ? 'Analyzing request' : 'Continuing analysis')
 
@@ -498,16 +510,18 @@ async function runLoop(
     // forwarding content deltas live as they arrive never ends up
     // "retracting" text the user already saw.
     const result = onToken
-      ? await chatCompletionStreamWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools }, onToken)
-      : await chatCompletionWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools })
+      ? await chatCompletionStreamWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools }, onToken, { signal })
+      : await chatCompletionWithRetry(ctx.llmBaseUrl, { model: ctx.modelKey, messages: state.messages, tools: llmTools }, { signal })
 
     if (!result.ok) {
-      ctx.embodiment.transition('ERROR', 'Local LLM request failed')
-      db(ctx).prepare("UPDATE tasks SET status='failed', error=?, completed_at=datetime('now') WHERE id=?").run(
+      const wasCancelled = signal?.aborted ?? false
+      ctx.embodiment.transition('ERROR', wasCancelled ? 'Task cancelled' : 'Local LLM request failed')
+      db(ctx).prepare(`UPDATE tasks SET status=?, error=?, completed_at=datetime('now') WHERE id=?`).run(
+        wasCancelled ? 'cancelled' : 'failed',
         JSON.stringify({ message: result.errorMessage }),
         taskId,
       )
-      return { success: false, conversationId, taskId, status: 'failed', error: result.errorMessage }
+      return { success: false, conversationId, taskId, status: wasCancelled ? 'cancelled' : 'failed', error: result.errorMessage, executedTools: state.executedTools }
     }
 
     const message = result.data?.choices?.[0]?.message
@@ -620,7 +634,7 @@ async function runLoop(
       }
 
       ctx.embodiment.transition('ACTING', summarizeToolCall(tool, args))
-      const toolResult = await executeToolNow(ctx, tool, args)
+      const toolResult = await executeToolNow(ctx, tool, args, signal)
       ctx.embodiment.transition('ACTING', summarizeToolResult(tool, toolResult))
       state.executedTools.push({ tool: tool.key, arguments: args, result: toolResult })
       seenThisRound.set(dedupKey, toolResult)
@@ -709,6 +723,7 @@ export async function runChat(
   message: string,
   conversationId?: string,
   onToken?: (delta: string) => void,
+  signal?: AbortSignal,
 ): Promise<ChatResult> {
   // Checked before saveMessage inserts the current message, so it
   // reflects whether a conversation existed *before* this request --
@@ -746,7 +761,7 @@ export async function runChat(
   const systemPrompt = await buildSystemPrompt(ctx.projectRoot, ctx, message)
   const messages: ChatMessage[] = [{ role: 'system', content: systemPrompt + planContext }, ...history]
 
-  const chatResult = await runLoop(ctx, taskId, convId, { messages, executedTools: [] }, onToken)
+  const chatResult = await runLoop(ctx, taskId, convId, { messages, executedTools: [] }, onToken, signal)
 
   // Only worth remembering across conversations when real project work
   // happened (a tool actually ran) -- not every trivial Q&A, which would

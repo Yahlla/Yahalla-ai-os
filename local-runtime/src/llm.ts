@@ -16,9 +16,21 @@ export async function chatCompletion(
   baseUrl: string,
   payload: Record<string, unknown>,
   timeoutMs = 120_000,
+  externalSignal?: AbortSignal,
 ): Promise<LlmCallResult> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  // Real cancellation support: a task-level abort (the user pressed
+  // "Stop") must reach the actual in-flight fetch to llama-server, not
+  // just be checked between agent-loop rounds -- a round can be a single
+  // long-running LLM generation with nothing else to check it against.
+  // Composed with the timeout controller above rather than passed
+  // directly, since this fetch already needs its own signal for the
+  // timeout case.
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort()
+    else externalSignal.addEventListener('abort', () => controller.abort(), { once: true })
+  }
   try {
     const response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
@@ -42,7 +54,9 @@ export async function chatCompletion(
     return {
       ok: false,
       errorMessage: isAbort
-        ? `Local LLM request timed out after ${timeoutMs}ms.`
+        ? externalSignal?.aborted
+          ? 'Local LLM request was cancelled.'
+          : `Local LLM request timed out after ${timeoutMs}ms.`
         : error instanceof Error
           ? error.message
           : 'Local LLM request failed.',
@@ -65,9 +79,14 @@ export async function chatCompletionStream(
   payload: Record<string, unknown>,
   onToken: (delta: string) => void,
   timeoutMs = 120_000,
+  externalSignal?: AbortSignal,
 ): Promise<LlmCallResult> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort()
+    else externalSignal.addEventListener('abort', () => controller.abort(), { once: true })
+  }
   try {
     const response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
@@ -138,7 +157,9 @@ export async function chatCompletionStream(
     return {
       ok: false,
       errorMessage: isAbort
-        ? `Local LLM request timed out after ${timeoutMs}ms.`
+        ? externalSignal?.aborted
+          ? 'Local LLM request was cancelled.'
+          : `Local LLM request timed out after ${timeoutMs}ms.`
         : error instanceof Error
           ? error.message
           : 'Local LLM streaming request failed.',
@@ -155,6 +176,12 @@ export async function chatCompletionStream(
 // the request itself is wrong and retrying it would just fail the same
 // way again, so those are never retried.
 function isTransientLlmError(errorMessage: string): boolean {
+  // Real cancellation-correctness fix: a deliberate user cancel must never
+  // be retried -- without this, the fallback "no HTTP status -> assume
+  // transient" rule below would treat "Local LLM request was cancelled."
+  // the same as a network hiccup and immediately retry the very request
+  // the user just stopped, up to maxRetries times.
+  if (errorMessage.includes('was cancelled')) return false
   const httpMatch = errorMessage.match(/HTTP (\d\d\d)/)
   if (httpMatch) {
     const status = Number(httpMatch[1])
@@ -169,12 +196,13 @@ function isTransientLlmError(errorMessage: string): boolean {
 export async function chatCompletionWithRetry(
   baseUrl: string,
   payload: Record<string, unknown>,
-  opts: { timeoutMs?: number; maxRetries?: number } = {},
+  opts: { timeoutMs?: number; maxRetries?: number; signal?: AbortSignal } = {},
 ): Promise<LlmCallResult> {
   const maxRetries = opts.maxRetries ?? 2
   let lastResult: LlmCallResult = { ok: false, errorMessage: 'Local LLM request failed.' }
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    lastResult = await chatCompletion(baseUrl, payload, opts.timeoutMs)
+    if (opts.signal?.aborted) return { ok: false, errorMessage: 'Local LLM request was cancelled.' }
+    lastResult = await chatCompletion(baseUrl, payload, opts.timeoutMs, opts.signal)
     if (lastResult.ok) return lastResult
     if (!isTransientLlmError(lastResult.errorMessage) || attempt === maxRetries) return lastResult
     await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt))
@@ -190,11 +218,12 @@ export async function chatCompletionStreamWithRetry(
   baseUrl: string,
   payload: Record<string, unknown>,
   onToken: (delta: string) => void,
-  opts: { timeoutMs?: number; maxRetries?: number } = {},
+  opts: { timeoutMs?: number; maxRetries?: number; signal?: AbortSignal } = {},
 ): Promise<LlmCallResult> {
   const maxRetries = opts.maxRetries ?? 2
   let lastResult: LlmCallResult = { ok: false, errorMessage: 'Local LLM streaming request failed.' }
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (opts.signal?.aborted) return { ok: false, errorMessage: 'Local LLM request was cancelled.' }
     let forwardedAny = false
     lastResult = await chatCompletionStream(
       baseUrl,
@@ -204,6 +233,7 @@ export async function chatCompletionStreamWithRetry(
         onToken(delta)
       },
       opts.timeoutMs,
+      opts.signal,
     )
     if (lastResult.ok) return lastResult
     if (forwardedAny || !isTransientLlmError(lastResult.errorMessage) || attempt === maxRetries) return lastResult

@@ -81,7 +81,7 @@ export function startClaimLoop(client: SupabaseClient, config: DeviceConfig): ()
       return
     }
 
-    const result = executeDeviceTool(
+    const result = await executeDeviceTool(
       toolKey,
       cfg.project_root,
       execution.input ?? {},

@@ -97,6 +97,17 @@ export function createHttpServer(deps: ServerDeps) {
   const embodiment = deps.embodiment ?? new EmbodimentStateMachine()
   const perception = deps.perception ?? new PerceptionManager(deps.db)
 
+  // Real task cancellation (audit finding: there was previously no way at
+  // all to stop a running chat/tool task -- not from the UI, not over
+  // HTTP, nothing). Keyed by a request id minted right here and handed
+  // back to the caller as the very first SSE frame on /chat/stream, so a
+  // "Stop" button pressed mid-generation has something concrete to cancel
+  // even for a brand-new conversation that doesn't have a conversation_id
+  // yet. Entries are removed as soon as the request they belong to
+  // finishes, successfully or not -- this map only ever holds genuinely
+  // in-flight requests.
+  const activeChatRequests = new Map<string, AbortController>()
+
   return createServer(async (req, res) => {
     applyCors(req, res, deps.config)
 
@@ -233,8 +244,21 @@ export function createHttpServer(deps: ServerDeps) {
         const body = await readJsonBody(req)
         const message = String(body.message ?? '')
         if (!message.trim()) return send(res, 400, { success: false, error: 'message is required.' })
-        const result = await runChat(ctxFrom(deps, embodiment, perception), message, typeof body.conversation_id === 'string' ? body.conversation_id : undefined)
-        return send(res, 200, result)
+        const requestId = crypto.randomUUID()
+        const controller = new AbortController()
+        activeChatRequests.set(requestId, controller)
+        try {
+          const result = await runChat(
+            ctxFrom(deps, embodiment, perception),
+            message,
+            typeof body.conversation_id === 'string' ? body.conversation_id : undefined,
+            undefined,
+            controller.signal,
+          )
+          return send(res, 200, { ...result, requestId })
+        } finally {
+          activeChatRequests.delete(requestId)
+        }
       }
 
       // Same as /chat, but emits each content token live over SSE as the
@@ -245,21 +269,59 @@ export function createHttpServer(deps: ServerDeps) {
       // final `done` frame carrying the exact same ChatResult shape
       // /chat returns (so callers that only care about the final result
       // and not live tokens can ignore the token frames entirely).
+      //
+      // The very first frame is `started` with a requestId -- real task
+      // cancellation (audit finding: none existed before) needs something
+      // to key on that the caller has in hand *before* the task finishes,
+      // which conversation_id alone can't provide for a brand-new
+      // conversation (the id doesn't exist yet on the very first message).
       if (path === '/chat/stream' && req.method === 'POST') {
         const body = await readJsonBody(req)
         const message = String(body.message ?? '')
         if (!message.trim()) return send(res, 400, { success: false, error: 'message is required.' })
 
+        const requestId = crypto.randomUUID()
+        const controller = new AbortController()
+        activeChatRequests.set(requestId, controller)
+
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
-        const result = await runChat(
-          ctxFrom(deps, embodiment, perception),
-          message,
-          typeof body.conversation_id === 'string' ? body.conversation_id : undefined,
-          (delta) => res.write(`data: ${JSON.stringify({ kind: 'token', delta })}\n\n`),
-        )
-        res.write(`data: ${JSON.stringify({ kind: 'done', ...result })}\n\n`)
-        res.end()
+        res.write(`data: ${JSON.stringify({ kind: 'started', requestId })}\n\n`)
+        try {
+          const result = await runChat(
+            ctxFrom(deps, embodiment, perception),
+            message,
+            typeof body.conversation_id === 'string' ? body.conversation_id : undefined,
+            (delta) => res.write(`data: ${JSON.stringify({ kind: 'token', delta })}\n\n`),
+            controller.signal,
+          )
+          res.write(`data: ${JSON.stringify({ kind: 'done', ...result })}\n\n`)
+        } finally {
+          activeChatRequests.delete(requestId)
+          res.end()
+        }
         return
+      }
+
+      // Real task cancellation: aborts the AbortController backing a
+      // still-in-flight /chat or /chat/stream request by the requestId it
+      // handed back. Kills the actual in-flight LLM fetch immediately
+      // (llm.ts composes this signal with its own timeout controller), and
+      // the tool-round loop (agentLoop.ts's runLoop) stops at the next
+      // checkpoint instead of continuing -- if a run_project_command
+      // subprocess is currently executing, this signal reaches it too
+      // (run_command.ts) and kills it rather than leaving it orphaned.
+      // Idempotent and side-effect-free for a requestId that has already
+      // finished or never existed -- cancelling a race against a task that
+      // just completed is a normal, harmless outcome, not an error.
+      if (path === '/chat/cancel' && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        const requestId = String(body.request_id ?? '')
+        const controller = activeChatRequests.get(requestId)
+        if (!controller) {
+          return send(res, 200, { success: false, cancelled: false, error: 'No active request with that id (it may have already finished).' })
+        }
+        controller.abort()
+        return send(res, 200, { success: true, cancelled: true })
       }
 
       const approvalMatch = path.match(/^\/approvals\/([^/]+)\/decide$/)

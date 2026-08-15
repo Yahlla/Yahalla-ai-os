@@ -128,3 +128,103 @@ test('POST /chat/stream streams real tokens over SSE while a tool call still exe
   assert.equal(doneFrame.answer, 'The version is 0.0.0.')
   assert.equal(doneFrame.executedTools?.[0]?.tool, 'read_project_file')
 })
+
+// Real audit finding closed: there was previously no way at all to cancel
+// a running chat/tool task -- no HTTP route, no AbortController anywhere
+// in the request path. This proves the whole chain actually stops a
+// request that would otherwise hang: a fake LLM that never responds
+// (simulating a genuinely stuck/slow local model, the exact case a user
+// would reach for a "Stop" button for), cancelled mid-flight via the real
+// POST /chat/cancel route using the requestId from the stream's own
+// "started" frame, and the stream must close promptly with a "cancelled"
+// result instead of hanging until the 120s LLM timeout.
+test('POST /chat/cancel actually stops an in-flight /chat/stream request instead of leaving it to hang until the LLM timeout', async () => {
+  const hangingLlm = createFakeHttpServer((req, res) => {
+    if (req.url === '/v1/models') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ id: 'fake-model' }] }))
+      return
+    }
+    // Deliberately never responds to /v1/chat/completions -- res.end() is
+    // never called. Without real cancellation, this request would only
+    // ever end via the 120s timeout.
+  })
+  await new Promise<void>((resolve) => hangingLlm.listen(18101, '127.0.0.1', () => resolve()))
+
+  const hangingModelProcess = new LocalModelProcess(18101)
+  ;(hangingModelProcess as any).child = { exitCode: null, killed: false }
+  const config: RuntimeConfig = { port: 0, authToken, projectRoot: projectDir, allowedOrigins: [] }
+  const cancelServer = createHttpServer({ db: openDb(':memory:'), config, modelProcess: hangingModelProcess })
+  await new Promise<void>((resolve) => cancelServer.listen(0, '127.0.0.1', () => resolve()))
+  const address = cancelServer.address()
+  const cancelBaseUrl = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`
+
+  try {
+    const streamResponse = await fetch(`${cancelBaseUrl}/chat/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify({ message: 'This will hang forever without real cancellation.' }),
+    })
+    assert.equal(streamResponse.status, 200)
+    const reader = streamResponse.body!.getReader()
+    const decoder = new TextDecoder()
+
+    // Read just enough to get the "started" frame and its requestId.
+    let buffer = ''
+    let requestId: string | undefined
+    while (!requestId) {
+      const { done, value } = await reader.read()
+      assert.equal(done, false, 'stream ended before a "started" frame ever arrived')
+      buffer += decoder.decode(value, { stream: true })
+      const frameEnd = buffer.indexOf('\n\n')
+      if (frameEnd === -1) continue
+      const frame = JSON.parse(buffer.slice('data:'.length, frameEnd).trim())
+      assert.equal(frame.kind, 'started')
+      requestId = frame.requestId
+      buffer = buffer.slice(frameEnd + 2)
+    }
+    assert.ok(requestId)
+
+    const cancelResponse = await fetch(`${cancelBaseUrl}/chat/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify({ request_id: requestId }),
+    })
+    const cancelBody = (await cancelResponse.json()) as any
+    assert.equal(cancelBody.success, true)
+    assert.equal(cancelBody.cancelled, true)
+
+    // The decisive assertion: the stream must actually close, promptly --
+    // not hang until the 120s LLM timeout -- and its final frame must say
+    // "cancelled", not silently pretend nothing happened.
+    const start = Date.now()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+    }
+    const elapsedMs = Date.now() - start
+    assert.ok(elapsedMs < 10_000, `expected the stream to close within a few seconds of cancelling, took ${elapsedMs}ms`)
+
+    const frames = buffer
+      .split('\n\n')
+      .filter((f) => f.startsWith('data:'))
+      .map((f) => JSON.parse(f.slice('data:'.length).trim()))
+    const doneFrame = frames.find((f) => f.kind === 'done')
+    assert.ok(doneFrame, 'expected a final "done" frame even for a cancelled request')
+    assert.equal(doneFrame.status, 'cancelled')
+
+    // No orphan process/state left behind: cancelling the same requestId
+    // again must be a clean no-op, not a crash or a second cancellation.
+    const secondCancel = await fetch(`${cancelBaseUrl}/chat/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify({ request_id: requestId }),
+    })
+    const secondCancelBody = (await secondCancel.json()) as any
+    assert.equal(secondCancelBody.cancelled, false)
+  } finally {
+    cancelServer.close()
+    hangingLlm.close()
+  }
+})

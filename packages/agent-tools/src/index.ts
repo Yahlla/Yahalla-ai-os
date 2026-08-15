@@ -7,8 +7,14 @@ export type DeviceToolExecutor = (
   projectRoot: string,
   args: Record<string, unknown>,
   toolConfiguration: Record<string, unknown>,
-) => ToolResult
+  signal?: AbortSignal,
+) => ToolResult | Promise<ToolResult>
 
+// Every entry other than run_project_command is genuinely synchronous
+// (in-process file/git operations) -- wrapping executeDeviceTool itself in
+// async is what lets a real cancellation signal reach run_project_command's
+// now-async spawn() (see run_command.ts) without needing every other tool
+// to pretend to be async too.
 const REGISTRY: Record<string, DeviceToolExecutor> = {
   read_project_file: (root, args) => readProjectFile(root, args),
   list_project_files: (root, args) => listProjectFiles(root, args),
@@ -19,20 +25,21 @@ const REGISTRY: Record<string, DeviceToolExecutor> = {
   git_create_branch: (root, args) => gitCreateBranch(root, args),
   git_commit: (root, args) => gitCommit(root, args),
   git_push: (root, args) => gitPush(root, args),
-  run_project_command: (root, args, config) => {
+  run_project_command: (root, args, config, signal) => {
     const allowlist = Array.isArray(config?.allowlist)
       ? config.allowlist.map(String)
       : undefined
-    return allowlist ? runProjectCommand(root, args, allowlist) : runProjectCommand(root, args)
+    return allowlist ? runProjectCommand(root, args, allowlist, signal) : runProjectCommand(root, args, undefined, signal)
   },
 }
 
-export function executeDeviceTool(
+export async function executeDeviceTool(
   toolKey: string,
   projectRoot: string,
   args: Record<string, unknown>,
   toolConfiguration: Record<string, unknown> = {},
-): ToolResult {
+  signal?: AbortSignal,
+): Promise<ToolResult> {
   const executor = REGISTRY[toolKey]
 
   if (!executor) {
@@ -40,7 +47,7 @@ export function executeDeviceTool(
   }
 
   try {
-    return executor(projectRoot, args, toolConfiguration)
+    return await executor(projectRoot, args, toolConfiguration, signal)
   } catch (error) {
     if (error instanceof PathEscapeError) {
       return { success: false, error: error.message }
